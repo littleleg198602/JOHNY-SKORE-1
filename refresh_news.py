@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import logging
 import math
 import os
 import re
@@ -69,6 +70,17 @@ SOURCES = [
     {"source": "PR Newswire", "type": "press releases", "paywall": "free", "info_level": 3, "template": "", "notes": "Bez RSS v šabloně – zatím ručně"},
     {"source": "Business Wire", "type": "press releases", "paywall": "free", "info_level": 3, "template": "", "notes": "Bez RSS v šabloně – zatím ručně"},
 ]
+
+
+
+
+def setup_logging() -> logging.Logger:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s | %(levelname)s | %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+    return logging.getLogger("refresh_news")
 
 
 def now_local_naive() -> dt.datetime:
@@ -216,7 +228,7 @@ def tech_score_from_mt5(mt5, symbol: str) -> Tuple[Optional[float], Dict[str, Op
     return score, {"Close": close, "MA20": ma20, "MA50": ma50, "RSI14": rsi14}, "ok_mt"
 
 
-def yahoo_details_and_score(symbol: str) -> Tuple[float, Dict[str, Optional[float]], str]:
+def yahoo_details_and_score(symbol: str, logger: Optional[logging.Logger] = None) -> Tuple[float, Dict[str, Optional[float]], str]:
     try:
         import yfinance as yf
     except Exception as e:
@@ -272,7 +284,9 @@ def yahoo_details_and_score(symbol: str) -> Tuple[float, Dict[str, Optional[floa
             "YahooRatingMean": float(reco) if reco is not None else None,
         }
         return score, details, "ok_yf"
-    except Exception:
+    except Exception as e:
+        if logger:
+            logger.warning("Yahoo data missing for %s: %s", symbol, e)
         return 0.0, {"YahooPrice": None, "YahooTarget": None, "YahooUpsidePct": None, "YahooRatingKey": None, "YahooRatingMean": None}, "missing"
 
 
@@ -301,7 +315,7 @@ def source_weight(info_level: int) -> float:
     return 0.5 + (float(info_level) / 5.0) * 1.5
 
 
-def fetch_rss_items_for_ticker(ticker: str, max_per_source: int = 12) -> List[NewsItem]:
+def fetch_rss_items_for_ticker(ticker: str, max_per_source: int = 12, logger: Optional[logging.Logger] = None) -> List[NewsItem]:
     try:
         import feedparser
     except Exception as e:
@@ -318,6 +332,8 @@ def fetch_rss_items_for_ticker(ticker: str, max_per_source: int = 12) -> List[Ne
         feed = feedparser.parse(url)
 
         if getattr(feed, "bozo", False) and getattr(feed, "bozo_exception", None):
+            if logger:
+                logger.warning("RSS parse issue for %s (%s): %s", ticker, src.get("source"), getattr(feed, "bozo_exception", "unknown"))
             continue
 
         info_level = int(src.get("info_level") or 3)
@@ -655,6 +671,8 @@ def build_dashboard(wb: Workbook):
 
 
 def main():
+    logger = setup_logging()
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--outdir", default=".", help="Kam uložit výstupní Excel (default: aktuální složka)")
     parser.add_argument("--marketcap", default=None, help="Volitelný soubor s marketcap/rank (xlsx/csv)")
@@ -662,14 +680,14 @@ def main():
 
     env = load_env_from_code_env("code.env")
     if env:
-        print(f"ENV: loaded {len(env)} vars from code.env")
+        logger.info("ENV: loaded %s vars from code.env", len(env))
 
     outdir = args.outdir
     os.makedirs(outdir, exist_ok=True)
 
     cap_map = try_load_marketcap_map(args.marketcap)
     if cap_map:
-        print(f"MarketCap: loaded {len(cap_map)} symbols from file")
+        logger.info("MarketCap: loaded %s symbols from file", len(cap_map))
 
     print("Step 1/4: MT5 watchlist symbols ...")
     mt5 = mt5_connect()
@@ -683,8 +701,9 @@ def main():
     for i, sym in enumerate(symbols, 1):
         print_bar("RSS", i, n)
         try:
-            items = fetch_rss_items_for_ticker(sym, max_per_source=10)
-        except Exception:
+            items = fetch_rss_items_for_ticker(sym, max_per_source=10, logger=logger)
+        except RuntimeError as e:
+            logger.error("RSS unavailable for %s: %s", sym, e)
             items = []
         all_items[sym] = items
 
@@ -708,7 +727,7 @@ def main():
         if tech_score is None:
             tech_score = 0.0
 
-        yahoo_score, ydetails, ystatus = yahoo_details_and_score(sym)
+        yahoo_score, ydetails, ystatus = yahoo_details_and_score(sym, logger=logger)
 
         total = compute_total_score_macro_logic(news_score, tech_score, yahoo_score)
         signal = signal_from_total_score_macro_logic(total)
