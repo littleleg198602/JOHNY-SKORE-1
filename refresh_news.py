@@ -33,7 +33,7 @@ import re
 import sys
 import time
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import openpyxl
 from openpyxl import Workbook
@@ -420,7 +420,12 @@ def entry_mentions_ticker(entry, ticker: str) -> bool:
     return False
 
 
-def fetch_rss_items_for_ticker(ticker: str, max_per_source: int = 12, logger: Optional[logging.Logger] = None) -> List[NewsItem]:
+def fetch_rss_items_for_ticker(
+    ticker: str,
+    max_per_source: int = 12,
+    logger: Optional[logging.Logger] = None,
+    source_health: Optional[Dict[str, Dict[str, Any]]] = None,
+) -> List[NewsItem]:
     try:
         import feedparser
     except Exception as e:
@@ -429,9 +434,18 @@ def fetch_rss_items_for_ticker(ticker: str, max_per_source: int = 12, logger: Op
     items: List[NewsItem] = []
 
     for src in SOURCES:
+        source_name = str(src.get("source") or "unknown")
         template = (src.get("template") or "").strip()
         if not template:
             continue
+
+        if source_health is not None:
+            state = source_health.setdefault(source_name, {"failures": 0, "disabled": False, "warned_disabled": False})
+            if state.get("disabled"):
+                if logger and not state.get("warned_disabled"):
+                    logger.info("RSS source disabled for this run: %s", source_name)
+                    state["warned_disabled"] = True
+                continue
 
         urls = []
         if "{ticker}" in template:
@@ -446,8 +460,13 @@ def fetch_rss_items_for_ticker(ticker: str, max_per_source: int = 12, logger: Op
             feed = feedparser.parse(url)
 
             if getattr(feed, "bozo", False) and getattr(feed, "bozo_exception", None):
+                if source_health is not None:
+                    state = source_health.setdefault(source_name, {"failures": 0, "disabled": False, "warned_disabled": False})
+                    state["failures"] += 1
+                    if state["failures"] >= 3:
+                        state["disabled"] = True
                 if logger:
-                    logger.warning("RSS parse issue for %s (%s): %s", ticker, src.get("source"), getattr(feed, "bozo_exception", "unknown"))
+                    logger.warning("RSS parse issue for %s (%s): %s", ticker, source_name, getattr(feed, "bozo_exception", "unknown"))
                 continue
 
             info_level = int(src.get("info_level") or 3)
@@ -881,11 +900,12 @@ def main():
     print("Step 2/4: Collect RSS news (supported sources only) ...")
     now_utc = dt.datetime.now(dt.timezone.utc)
     all_items: Dict[str, List[NewsItem]] = {}
+    source_health: Dict[str, Dict[str, Any]] = {}
     n = len(symbols)
     for i, sym in enumerate(symbols, 1):
         print_bar("RSS", i, n)
         try:
-            items = fetch_rss_items_for_ticker(sym, max_per_source=10, logger=logger)
+            items = fetch_rss_items_for_ticker(sym, max_per_source=10, logger=logger, source_health=source_health)
         except RuntimeError as e:
             logger.error("RSS unavailable for %s: %s", sym, e)
             items = []
