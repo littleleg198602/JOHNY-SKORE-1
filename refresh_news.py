@@ -546,35 +546,85 @@ def signal_from_total_score_macro_logic(total_0_100: float) -> str:
     return "STRONG SELL"
 
 
-def last_week_monday_friday_change_pct(mt5, symbol: str) -> Tuple[Optional[float], str]:
-    rates = mt5_copy_rates(mt5, symbol, mt5.TIMEFRAME_D1, 40)
-    if rates is None or len(rates) == 0:
-        return None, "missing"
+def _change_pct_between_dates(mt5, symbol: str, start_date: dt.date, end_date: dt.date, yf_period: str = "6mo") -> Tuple[Optional[float], str]:
+    def calc_change_from_bars(bars: List[Tuple[dt.date, float, float]]) -> Optional[float]:
+        if not bars:
+            return None
+        bars.sort(key=lambda x: x[0])
+        first_day_open = bars[0][1]
+        last_day_close = bars[-1][2]
+        if first_day_open == 0:
+            return None
+        return (last_day_close / first_day_open - 1.0) * 100.0
 
+    # 1) Primárně MT5
+    mt5_bars: List[Tuple[dt.date, float, float]] = []
+    try:
+        dt_from = dt.datetime.combine(start_date, dt.time.min)
+        dt_to = dt.datetime.combine(end_date + dt.timedelta(days=1), dt.time.min)
+        rates = mt5.copy_rates_range(symbol, mt5.TIMEFRAME_D1, dt_from, dt_to)
+        if rates is not None:
+            for r in rates:
+                bar_date = dt.datetime.fromtimestamp(int(r["time"])).date()
+                if start_date <= bar_date <= end_date:
+                    mt5_bars.append((bar_date, float(r["open"]), float(r["close"])))
+    except Exception:
+        mt5_bars = []
+
+    change_mt5 = calc_change_from_bars(mt5_bars)
+    if change_mt5 is not None:
+        return change_mt5, "ok_mt"
+
+    # 2) Fallback: yfinance
+    try:
+        import yfinance as yf
+
+        hist = yf.Ticker(symbol).history(period=yf_period, interval="1d")
+        yf_bars: List[Tuple[dt.date, float, float]] = []
+        for idx, row in hist.iterrows():
+            bar_date = idx.date()
+            if not (start_date <= bar_date <= end_date):
+                continue
+            o = row.get("Open")
+            c = row.get("Close")
+            if o is None or c is None:
+                continue
+            try:
+                yf_bars.append((bar_date, float(o), float(c)))
+            except Exception:
+                continue
+
+        change_yf = calc_change_from_bars(yf_bars)
+        if change_yf is not None:
+            return change_yf, "ok_yf"
+    except Exception:
+        pass
+
+    return None, "missing"
+
+
+def last_week_monday_friday_change_pct(mt5, symbol: str) -> Tuple[Optional[float], str]:
     today = now_local_naive().date()
     this_monday = today - dt.timedelta(days=today.weekday())
     last_monday = this_monday - dt.timedelta(days=7)
     last_friday = last_monday + dt.timedelta(days=4)
 
-    monday_open = None
-    friday_close = None
+    # Některé trhy/symboly nemusí mít svíčku přesně v pondělí/pátek
+    # (svátky, specifické obchodní hodiny). Proto se bere první + poslední
+    # dostupný obchodní den v okně Po-Pá minulého týdne.
+    return _change_pct_between_dates(mt5, symbol, last_monday, last_friday, yf_period="1mo")
 
-    for r in rates:
-        bar_date = dt.datetime.fromtimestamp(int(r["time"])).date()
-        if bar_date < last_monday or bar_date > last_friday:
-            continue
 
-        if bar_date.weekday() == 0 and monday_open is None:
-            monday_open = float(r["open"])
+def last_1m_change_pct(mt5, symbol: str) -> Tuple[Optional[float], str]:
+    end_date = now_local_naive().date()
+    start_date = end_date - dt.timedelta(days=30)
+    return _change_pct_between_dates(mt5, symbol, start_date, end_date, yf_period="6mo")
 
-        if bar_date.weekday() == 4:
-            friday_close = float(r["close"])
 
-    if monday_open is None or friday_close is None or monday_open == 0:
-        return None, "missing"
-
-    change_pct = (friday_close / monday_open - 1.0) * 100.0
-    return change_pct, "ok_mt"
+def last_3m_change_pct(mt5, symbol: str) -> Tuple[Optional[float], str]:
+    end_date = now_local_naive().date()
+    start_date = end_date - dt.timedelta(days=90)
+    return _change_pct_between_dates(mt5, symbol, start_date, end_date, yf_period="1y")
 
 
 def try_load_marketcap_map(path: Optional[str]) -> Dict[str, Tuple[Optional[float], Optional[int]]]:
@@ -690,6 +740,12 @@ def create_workbook_template() -> Workbook:
         "LastWeekMonFriChangePct",
         "LastWeekMonFriDropPctText",
         "LastWeekMonFriStatus",
+        "Last1MChangePct",
+        "Last1MChangePctText",
+        "Last1MStatus",
+        "Last3MChangePct",
+        "Last3MChangePctText",
+        "Last3MStatus",
     ]
 
     ws.append(headers)
@@ -758,6 +814,11 @@ def build_dashboard(wb: Workbook):
             "TechScore": get(row, "TechScore(0-50)"),
             "YahooScore": get(row, "YahooScore(-20..20)"),
             "LastWeekMonFriChangePct": get(row, "LastWeekMonFriChangePct"),
+            "LastWeekMonFriStatus": get(row, "LastWeekMonFriStatus"),
+            "Last1MChangePct": get(row, "Last1MChangePct"),
+            "Last1MStatus": get(row, "Last1MStatus"),
+            "Last3MChangePct": get(row, "Last3MChangePct"),
+            "Last3MStatus": get(row, "Last3MStatus"),
         })
 
     def write_section(title, start_row, cols, rows):
@@ -816,13 +877,60 @@ def build_dashboard(wb: Workbook):
             "LastWeekMonFriChangePct": f"{float(d['LastWeekMonFriChangePct']):.2f}%",
             "TotalScore(0-100)": d["TotalScore"],
             "Signal": d["Signal"],
+            "LastWeekMonFriStatus": d["LastWeekMonFriStatus"],
         })
 
     r = write_section(
         "Top 20 nejvetsi propady minuly tyden (Po-Pa, %)",
         r,
-        ["Rank", "Ticker", "LastWeekMonFriChangePct", "TotalScore(0-100)", "Signal"],
+        ["Rank", "Ticker", "LastWeekMonFriChangePct", "TotalScore(0-100)", "Signal", "LastWeekMonFriStatus"],
         biggest_weekly_drops_rows
+    )
+
+    # Největší 20 propadů za poslední měsíc
+    biggest_1m_drops = sorted(
+        [d for d in data if d["Last1MChangePct"] is not None and float(d["Last1MChangePct"]) < 0],
+        key=lambda x: float(x["Last1MChangePct"])
+    )[:20]
+    biggest_1m_drops_rows = []
+    for i, d in enumerate(biggest_1m_drops, 1):
+        biggest_1m_drops_rows.append({
+            "Rank": i,
+            "Ticker": d["Ticker"],
+            "Last1MChangePct": f"{float(d['Last1MChangePct']):.2f}%",
+            "TotalScore(0-100)": d["TotalScore"],
+            "Signal": d["Signal"],
+            "Last1MStatus": d["Last1MStatus"],
+        })
+
+    r = write_section(
+        "Top 20 nejvetsi propady za 1 mesic (%)",
+        r,
+        ["Rank", "Ticker", "Last1MChangePct", "TotalScore(0-100)", "Signal", "Last1MStatus"],
+        biggest_1m_drops_rows
+    )
+
+    # Největší 20 propadů za poslední 3 měsíce
+    biggest_3m_drops = sorted(
+        [d for d in data if d["Last3MChangePct"] is not None and float(d["Last3MChangePct"]) < 0],
+        key=lambda x: float(x["Last3MChangePct"])
+    )[:20]
+    biggest_3m_drops_rows = []
+    for i, d in enumerate(biggest_3m_drops, 1):
+        biggest_3m_drops_rows.append({
+            "Rank": i,
+            "Ticker": d["Ticker"],
+            "Last3MChangePct": f"{float(d['Last3MChangePct']):.2f}%",
+            "TotalScore(0-100)": d["TotalScore"],
+            "Signal": d["Signal"],
+            "Last3MStatus": d["Last3MStatus"],
+        })
+
+    r = write_section(
+        "Top 20 nejvetsi propady za 3 mesice (%)",
+        r,
+        ["Rank", "Ticker", "Last3MChangePct", "TotalScore(0-100)", "Signal", "Last3MStatus"],
+        biggest_3m_drops_rows
     )
 
     # Top 20 by MarketCap
@@ -935,6 +1043,8 @@ def main():
 
         yahoo_score, ydetails, ystatus = yahoo_details_and_score(sym, logger=logger)
         last_week_drop_pct, last_week_drop_status = last_week_monday_friday_change_pct(mt5, sym)
+        last_1m_drop_pct, last_1m_drop_status = last_1m_change_pct(mt5, sym)
+        last_3m_drop_pct, last_3m_drop_status = last_3m_change_pct(mt5, sym)
 
         total = compute_total_score_macro_logic(news_score, tech_score, yahoo_score)
         signal = signal_from_total_score_macro_logic(total)
@@ -970,6 +1080,12 @@ def main():
             round(last_week_drop_pct, 2) if last_week_drop_pct is not None else None,
             f"{last_week_drop_pct:.2f}%" if last_week_drop_pct is not None else None,
             last_week_drop_status,
+            round(last_1m_drop_pct, 2) if last_1m_drop_pct is not None else None,
+            f"{last_1m_drop_pct:.2f}%" if last_1m_drop_pct is not None else None,
+            last_1m_drop_status,
+            round(last_3m_drop_pct, 2) if last_3m_drop_pct is not None else None,
+            f"{last_3m_drop_pct:.2f}%" if last_3m_drop_pct is not None else None,
+            last_3m_drop_status,
         ])
 
     print("\nStep 4/4: SAVE workbook ...")
