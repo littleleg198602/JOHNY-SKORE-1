@@ -228,6 +228,76 @@ def tech_score_from_mt5(mt5, symbol: str) -> Tuple[Optional[float], Dict[str, Op
     return score, {"Close": close, "MA20": ma20, "MA50": ma50, "RSI14": rsi14}, "ok_mt"
 
 
+
+
+def tech_score_from_yfinance(symbol: str, logger: Optional[logging.Logger] = None) -> Tuple[Optional[float], Dict[str, Optional[float]], str]:
+    try:
+        import yfinance as yf
+    except Exception:
+        return None, {"Close": None, "MA20": None, "MA50": None, "RSI14": None}, "missing_yf"
+
+    try:
+        hist = yf.Ticker(symbol).history(period="12mo", interval="1d")
+        closes = []
+        for _, row in hist.iterrows():
+            c = row.get("Close")
+            if c is None:
+                continue
+            try:
+                closes.append(float(c))
+            except Exception:
+                continue
+
+        if len(closes) < 60:
+            return None, {"Close": None, "MA20": None, "MA50": None, "RSI14": None}, "missing_yf"
+
+        close = closes[-1]
+        ma20 = sma(closes, 20)
+        ma50 = sma(closes, 50)
+        rsi14 = rsi(closes, 14)
+
+        score = 0.0
+
+        if ma20 is not None and ma50 is not None:
+            if ma20 > ma50:
+                score += 12
+            else:
+                score += 4
+            if close > ma20:
+                score += 8
+            else:
+                score += 2
+
+        if rsi14 is not None:
+            if 45 <= rsi14 <= 65:
+                score += 15
+            elif 35 <= rsi14 < 45 or 65 < rsi14 <= 75:
+                score += 10
+            elif 25 <= rsi14 < 35 or 75 < rsi14 <= 85:
+                score += 6
+            else:
+                score += 3
+
+        if ma20 is not None:
+            dist = (close - ma20) / ma20 * 100.0
+            if dist >= 8:
+                score += 2
+            elif dist >= 3:
+                score += 6
+            elif dist >= -3:
+                score += 10
+            elif dist >= -8:
+                score += 6
+            else:
+                score += 2
+
+        score = max(0.0, min(50.0, score))
+        return score, {"Close": close, "MA20": ma20, "MA50": ma50, "RSI14": rsi14}, "ok_yf_tech"
+    except Exception as e:
+        if logger:
+            logger.warning("Tech fallback (yfinance) missing for %s: %s", symbol, e)
+        return None, {"Close": None, "MA20": None, "MA50": None, "RSI14": None}, "missing_yf"
+
 def yahoo_details_and_score(symbol: str, logger: Optional[logging.Logger] = None) -> Tuple[float, Dict[str, Optional[float]], str]:
     try:
         import yfinance as yf
@@ -315,6 +385,41 @@ def source_weight(info_level: int) -> float:
     return 0.5 + (float(info_level) / 5.0) * 1.5
 
 
+
+
+def ticker_candidates(ticker: str) -> List[str]:
+    t = (ticker or "").strip().upper()
+    if not t:
+        return []
+
+    candidates = {t}
+    if "." in t:
+        candidates.add(t.replace(".", "-"))
+        candidates.add(t.replace(".", ""))
+    if "-" in t:
+        candidates.add(t.replace("-", "."))
+        candidates.add(t.replace("-", ""))
+
+    return sorted(candidates)
+
+
+def entry_mentions_ticker(entry, ticker: str) -> bool:
+    text_parts = [
+        str(getattr(entry, "title", "") or ""),
+        str(getattr(entry, "summary", "") or ""),
+        str(getattr(entry, "link", "") or ""),
+    ]
+    text = " ".join(text_parts).upper()
+
+    for candidate in ticker_candidates(ticker):
+        token = candidate.upper()
+        if f" {token} " in f" {text} ":
+            return True
+        if f"({token})" in text or f":{token}" in text or f"/{token}" in text:
+            return True
+    return False
+
+
 def fetch_rss_items_for_ticker(ticker: str, max_per_source: int = 12, logger: Optional[logging.Logger] = None) -> List[NewsItem]:
     try:
         import feedparser
@@ -325,35 +430,57 @@ def fetch_rss_items_for_ticker(ticker: str, max_per_source: int = 12, logger: Op
 
     for src in SOURCES:
         template = (src.get("template") or "").strip()
-        if "{ticker}" not in template:
+        if not template:
             continue
 
-        url = template.format(ticker=ticker)
-        feed = feedparser.parse(url)
+        urls = []
+        if "{ticker}" in template:
+            for c in ticker_candidates(ticker):
+                urls.append(template.format(ticker=c))
+        else:
+            urls.append(template)
 
-        if getattr(feed, "bozo", False) and getattr(feed, "bozo_exception", None):
-            if logger:
-                logger.warning("RSS parse issue for %s (%s): %s", ticker, src.get("source"), getattr(feed, "bozo_exception", "unknown"))
-            continue
+        seen_links = set()
 
-        info_level = int(src.get("info_level") or 3)
-        w = source_weight(info_level)
+        for url in urls:
+            feed = feedparser.parse(url)
 
-        entries = getattr(feed, "entries", []) or []
-        for e in entries[:max_per_source]:
-            title = getattr(e, "title", "") or ""
-            link = getattr(e, "link", "") or ""
-            pub = parse_published_dt(e)
-            items.append(
-                NewsItem(
-                    ticker=ticker,
-                    source=str(src.get("source")),
-                    title=title,
-                    link=link,
-                    published_utc=pub,
-                    weight=w,
+            if getattr(feed, "bozo", False) and getattr(feed, "bozo_exception", None):
+                if logger:
+                    logger.warning("RSS parse issue for %s (%s): %s", ticker, src.get("source"), getattr(feed, "bozo_exception", "unknown"))
+                continue
+
+            info_level = int(src.get("info_level") or 3)
+            w = source_weight(info_level)
+
+            entries = getattr(feed, "entries", []) or []
+            taken = 0
+            for e in entries:
+                if taken >= max_per_source:
+                    break
+
+                if "{ticker}" not in template and not entry_mentions_ticker(e, ticker):
+                    continue
+
+                title = getattr(e, "title", "") or ""
+                link = getattr(e, "link", "") or ""
+                if link and link in seen_links:
+                    continue
+                if link:
+                    seen_links.add(link)
+
+                pub = parse_published_dt(e)
+                items.append(
+                    NewsItem(
+                        ticker=ticker,
+                        source=str(src.get("source")),
+                        title=title,
+                        link=link,
+                        published_utc=pub,
+                        weight=w,
+                    )
                 )
-            )
+                taken += 1
 
     return items
 
@@ -542,6 +669,7 @@ def create_workbook_template() -> Workbook:
         "YahooRatingKey",
         "YahooRatingMean",
         "LastWeekMonFriChangePct",
+        "LastWeekMonFriDropPctText",
         "LastWeekMonFriStatus",
     ]
 
@@ -781,6 +909,8 @@ def main():
 
         tech_score, tech_details, tech_status = tech_score_from_mt5(mt5, sym)
         if tech_score is None:
+            tech_score, tech_details, tech_status = tech_score_from_yfinance(sym, logger=logger)
+        if tech_score is None:
             tech_score = 0.0
 
         yahoo_score, ydetails, ystatus = yahoo_details_and_score(sym, logger=logger)
@@ -818,6 +948,7 @@ def main():
             ydetails.get("YahooRatingKey"),
             ydetails.get("YahooRatingMean"),
             round(last_week_drop_pct, 2) if last_week_drop_pct is not None else None,
+            f"{last_week_drop_pct:.2f}%" if last_week_drop_pct is not None else None,
             last_week_drop_status,
         ])
 
