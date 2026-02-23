@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import logging
 import math
 import os
 import re
@@ -69,6 +70,17 @@ SOURCES = [
     {"source": "PR Newswire", "type": "press releases", "paywall": "free", "info_level": 3, "template": "", "notes": "Bez RSS v šabloně – zatím ručně"},
     {"source": "Business Wire", "type": "press releases", "paywall": "free", "info_level": 3, "template": "", "notes": "Bez RSS v šabloně – zatím ručně"},
 ]
+
+
+
+
+def setup_logging() -> logging.Logger:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s | %(levelname)s | %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+    return logging.getLogger("refresh_news")
 
 
 def now_local_naive() -> dt.datetime:
@@ -216,7 +228,7 @@ def tech_score_from_mt5(mt5, symbol: str) -> Tuple[Optional[float], Dict[str, Op
     return score, {"Close": close, "MA20": ma20, "MA50": ma50, "RSI14": rsi14}, "ok_mt"
 
 
-def yahoo_details_and_score(symbol: str) -> Tuple[float, Dict[str, Optional[float]], str]:
+def yahoo_details_and_score(symbol: str, logger: Optional[logging.Logger] = None) -> Tuple[float, Dict[str, Optional[float]], str]:
     try:
         import yfinance as yf
     except Exception as e:
@@ -272,7 +284,9 @@ def yahoo_details_and_score(symbol: str) -> Tuple[float, Dict[str, Optional[floa
             "YahooRatingMean": float(reco) if reco is not None else None,
         }
         return score, details, "ok_yf"
-    except Exception:
+    except Exception as e:
+        if logger:
+            logger.warning("Yahoo data missing for %s: %s", symbol, e)
         return 0.0, {"YahooPrice": None, "YahooTarget": None, "YahooUpsidePct": None, "YahooRatingKey": None, "YahooRatingMean": None}, "missing"
 
 
@@ -301,7 +315,7 @@ def source_weight(info_level: int) -> float:
     return 0.5 + (float(info_level) / 5.0) * 1.5
 
 
-def fetch_rss_items_for_ticker(ticker: str, max_per_source: int = 12) -> List[NewsItem]:
+def fetch_rss_items_for_ticker(ticker: str, max_per_source: int = 12, logger: Optional[logging.Logger] = None) -> List[NewsItem]:
     try:
         import feedparser
     except Exception as e:
@@ -318,6 +332,8 @@ def fetch_rss_items_for_ticker(ticker: str, max_per_source: int = 12) -> List[Ne
         feed = feedparser.parse(url)
 
         if getattr(feed, "bozo", False) and getattr(feed, "bozo_exception", None):
+            if logger:
+                logger.warning("RSS parse issue for %s (%s): %s", ticker, src.get("source"), getattr(feed, "bozo_exception", "unknown"))
             continue
 
         info_level = int(src.get("info_level") or 3)
@@ -382,6 +398,37 @@ def signal_from_total_score_macro_logic(total_0_100: float) -> str:
     if total_0_100 >= 40:
         return "SELL"
     return "STRONG SELL"
+
+
+def last_week_monday_friday_change_pct(mt5, symbol: str) -> Tuple[Optional[float], str]:
+    rates = mt5_copy_rates(mt5, symbol, mt5.TIMEFRAME_D1, 40)
+    if rates is None or len(rates) == 0:
+        return None, "missing"
+
+    today = now_local_naive().date()
+    this_monday = today - dt.timedelta(days=today.weekday())
+    last_monday = this_monday - dt.timedelta(days=7)
+    last_friday = last_monday + dt.timedelta(days=4)
+
+    monday_open = None
+    friday_close = None
+
+    for r in rates:
+        bar_date = dt.datetime.fromtimestamp(int(r["time"])).date()
+        if bar_date < last_monday or bar_date > last_friday:
+            continue
+
+        if bar_date.weekday() == 0 and monday_open is None:
+            monday_open = float(r["open"])
+
+        if bar_date.weekday() == 4:
+            friday_close = float(r["close"])
+
+    if monday_open is None or friday_close is None or monday_open == 0:
+        return None, "missing"
+
+    change_pct = (friday_close / monday_open - 1.0) * 100.0
+    return change_pct, "ok_mt"
 
 
 def try_load_marketcap_map(path: Optional[str]) -> Dict[str, Tuple[Optional[float], Optional[int]]]:
@@ -494,6 +541,8 @@ def create_workbook_template() -> Workbook:
         "YahooUpsidePct",
         "YahooRatingKey",
         "YahooRatingMean",
+        "LastWeekMonFriChangePct",
+        "LastWeekMonFriStatus",
     ]
 
     ws.append(headers)
@@ -561,6 +610,7 @@ def build_dashboard(wb: Workbook):
             "NewsScore": get(row, "NewsScore(0-50)"),
             "TechScore": get(row, "TechScore(0-50)"),
             "YahooScore": get(row, "YahooScore(-20..20)"),
+            "LastWeekMonFriChangePct": get(row, "LastWeekMonFriChangePct"),
         })
 
     def write_section(title, start_row, cols, rows):
@@ -604,6 +654,28 @@ def build_dashboard(wb: Workbook):
         r,
         ["Rank", "Ticker", "TotalScore(0-100)", "Signal", "MarketCapUSD", "NewsScore(0-50)", "TechScore(0-50)", "YahooScore(-20..20)"],
         top_total_rows
+    )
+
+    # Největší 20 propadů za minulý týden (pondělí -> pátek)
+    biggest_weekly_drops = sorted(
+        [d for d in data if d["LastWeekMonFriChangePct"] is not None and float(d["LastWeekMonFriChangePct"]) < 0],
+        key=lambda x: float(x["LastWeekMonFriChangePct"])
+    )[:20]
+    biggest_weekly_drops_rows = []
+    for i, d in enumerate(biggest_weekly_drops, 1):
+        biggest_weekly_drops_rows.append({
+            "Rank": i,
+            "Ticker": d["Ticker"],
+            "LastWeekMonFriChangePct": f"{float(d['LastWeekMonFriChangePct']):.2f}%",
+            "TotalScore(0-100)": d["TotalScore"],
+            "Signal": d["Signal"],
+        })
+
+    r = write_section(
+        "Top 20 nejvetsi propady minuly tyden (Po-Pa, %)",
+        r,
+        ["Rank", "Ticker", "LastWeekMonFriChangePct", "TotalScore(0-100)", "Signal"],
+        biggest_weekly_drops_rows
     )
 
     # Top 20 by MarketCap
@@ -655,6 +727,8 @@ def build_dashboard(wb: Workbook):
 
 
 def main():
+    logger = setup_logging()
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--outdir", default=".", help="Kam uložit výstupní Excel (default: aktuální složka)")
     parser.add_argument("--marketcap", default=None, help="Volitelný soubor s marketcap/rank (xlsx/csv)")
@@ -662,14 +736,14 @@ def main():
 
     env = load_env_from_code_env("code.env")
     if env:
-        print(f"ENV: loaded {len(env)} vars from code.env")
+        logger.info("ENV: loaded %s vars from code.env", len(env))
 
     outdir = args.outdir
     os.makedirs(outdir, exist_ok=True)
 
     cap_map = try_load_marketcap_map(args.marketcap)
     if cap_map:
-        print(f"MarketCap: loaded {len(cap_map)} symbols from file")
+        logger.info("MarketCap: loaded %s symbols from file", len(cap_map))
 
     print("Step 1/4: MT5 watchlist symbols ...")
     mt5 = mt5_connect()
@@ -683,8 +757,9 @@ def main():
     for i, sym in enumerate(symbols, 1):
         print_bar("RSS", i, n)
         try:
-            items = fetch_rss_items_for_ticker(sym, max_per_source=10)
-        except Exception:
+            items = fetch_rss_items_for_ticker(sym, max_per_source=10, logger=logger)
+        except RuntimeError as e:
+            logger.error("RSS unavailable for %s: %s", sym, e)
             items = []
         all_items[sym] = items
 
@@ -708,7 +783,8 @@ def main():
         if tech_score is None:
             tech_score = 0.0
 
-        yahoo_score, ydetails, ystatus = yahoo_details_and_score(sym)
+        yahoo_score, ydetails, ystatus = yahoo_details_and_score(sym, logger=logger)
+        last_week_drop_pct, last_week_drop_status = last_week_monday_friday_change_pct(mt5, sym)
 
         total = compute_total_score_macro_logic(news_score, tech_score, yahoo_score)
         signal = signal_from_total_score_macro_logic(total)
@@ -741,6 +817,8 @@ def main():
             ydetails.get("YahooUpsidePct"),
             ydetails.get("YahooRatingKey"),
             ydetails.get("YahooRatingMean"),
+            round(last_week_drop_pct, 2) if last_week_drop_pct is not None else None,
+            last_week_drop_status,
         ])
 
     print("\nStep 4/4: SAVE workbook ...")
