@@ -547,34 +547,69 @@ def signal_from_total_score_macro_logic(total_0_100: float) -> str:
 
 
 def last_week_monday_friday_change_pct(mt5, symbol: str) -> Tuple[Optional[float], str]:
-    rates = mt5_copy_rates(mt5, symbol, mt5.TIMEFRAME_D1, 40)
-    if rates is None or len(rates) == 0:
-        return None, "missing"
-
     today = now_local_naive().date()
     this_monday = today - dt.timedelta(days=today.weekday())
     last_monday = this_monday - dt.timedelta(days=7)
     last_friday = last_monday + dt.timedelta(days=4)
 
-    monday_open = None
-    friday_close = None
+    def calc_change_from_bars(week_bars: List[Tuple[dt.date, float, float]]) -> Optional[float]:
+        if not week_bars:
+            return None
+        # Některé trhy/symboly nemusí mít svíčku přesně v pondělí/pátek
+        # (svátky, specifické obchodní hodiny). Proto bereme první a poslední
+        # dostupný obchodní den z minulého týdne Po-Pá.
+        week_bars.sort(key=lambda x: x[0])
+        first_day_open = week_bars[0][1]
+        last_day_close = week_bars[-1][2]
+        if first_day_open == 0:
+            return None
+        return (last_day_close / first_day_open - 1.0) * 100.0
 
-    for r in rates:
-        bar_date = dt.datetime.fromtimestamp(int(r["time"])).date()
-        if bar_date < last_monday or bar_date > last_friday:
-            continue
+    # 1) Primárně MT5: explicitní range minulého týdne (spolehlivější než from_pos).
+    week_bars_mt5: List[Tuple[dt.date, float, float]] = []
+    try:
+        dt_from = dt.datetime.combine(last_monday, dt.time.min)
+        dt_to = dt.datetime.combine(last_friday + dt.timedelta(days=1), dt.time.min)
+        rates = mt5.copy_rates_range(symbol, mt5.TIMEFRAME_D1, dt_from, dt_to)
+        if rates is not None:
+            for r in rates:
+                bar_date = dt.datetime.fromtimestamp(int(r["time"])).date()
+                if last_monday <= bar_date <= last_friday:
+                    week_bars_mt5.append((bar_date, float(r["open"]), float(r["close"])))
+    except Exception:
+        week_bars_mt5 = []
 
-        if bar_date.weekday() == 0 and monday_open is None:
-            monday_open = float(r["open"])
+    change_mt5 = calc_change_from_bars(week_bars_mt5)
+    if change_mt5 is not None:
+        return change_mt5, "ok_mt"
 
-        if bar_date.weekday() == 4:
-            friday_close = float(r["close"])
+    # 2) Fallback: yfinance (když MT5 pro daný symbol nic nevrátí).
+    # V dashboardu tak nezmizí většina instrumentů jen kvůli chybějící historii v MT5.
+    try:
+        import yfinance as yf
 
-    if monday_open is None or friday_close is None or monday_open == 0:
-        return None, "missing"
+        hist = yf.Ticker(symbol).history(period="1mo", interval="1d")
+        week_bars_yf: List[Tuple[dt.date, float, float]] = []
+        for idx, row in hist.iterrows():
+            bar_date = idx.date()
+            if not (last_monday <= bar_date <= last_friday):
+                continue
+            o = row.get("Open")
+            c = row.get("Close")
+            if o is None or c is None:
+                continue
+            try:
+                week_bars_yf.append((bar_date, float(o), float(c)))
+            except Exception:
+                continue
 
-    change_pct = (friday_close / monday_open - 1.0) * 100.0
-    return change_pct, "ok_mt"
+        change_yf = calc_change_from_bars(week_bars_yf)
+        if change_yf is not None:
+            return change_yf, "ok_yf"
+    except Exception:
+        pass
+
+    return None, "missing"
 
 
 def try_load_marketcap_map(path: Optional[str]) -> Dict[str, Tuple[Optional[float], Optional[int]]]:
@@ -758,6 +793,7 @@ def build_dashboard(wb: Workbook):
             "TechScore": get(row, "TechScore(0-50)"),
             "YahooScore": get(row, "YahooScore(-20..20)"),
             "LastWeekMonFriChangePct": get(row, "LastWeekMonFriChangePct"),
+            "LastWeekMonFriStatus": get(row, "LastWeekMonFriStatus"),
         })
 
     def write_section(title, start_row, cols, rows):
@@ -816,12 +852,13 @@ def build_dashboard(wb: Workbook):
             "LastWeekMonFriChangePct": f"{float(d['LastWeekMonFriChangePct']):.2f}%",
             "TotalScore(0-100)": d["TotalScore"],
             "Signal": d["Signal"],
+            "LastWeekMonFriStatus": d["LastWeekMonFriStatus"],
         })
 
     r = write_section(
         "Top 20 nejvetsi propady minuly tyden (Po-Pa, %)",
         r,
-        ["Rank", "Ticker", "LastWeekMonFriChangePct", "TotalScore(0-100)", "Signal"],
+        ["Rank", "Ticker", "LastWeekMonFriChangePct", "TotalScore(0-100)", "Signal", "LastWeekMonFriStatus"],
         biggest_weekly_drops_rows
     )
 
