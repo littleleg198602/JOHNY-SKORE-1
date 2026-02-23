@@ -400,6 +400,37 @@ def signal_from_total_score_macro_logic(total_0_100: float) -> str:
     return "STRONG SELL"
 
 
+def last_week_monday_friday_change_pct(mt5, symbol: str) -> Tuple[Optional[float], str]:
+    rates = mt5_copy_rates(mt5, symbol, mt5.TIMEFRAME_D1, 40)
+    if rates is None or len(rates) == 0:
+        return None, "missing"
+
+    today = now_local_naive().date()
+    this_monday = today - dt.timedelta(days=today.weekday())
+    last_monday = this_monday - dt.timedelta(days=7)
+    last_friday = last_monday + dt.timedelta(days=4)
+
+    monday_open = None
+    friday_close = None
+
+    for r in rates:
+        bar_date = dt.datetime.fromtimestamp(int(r["time"])).date()
+        if bar_date < last_monday or bar_date > last_friday:
+            continue
+
+        if bar_date.weekday() == 0 and monday_open is None:
+            monday_open = float(r["open"])
+
+        if bar_date.weekday() == 4:
+            friday_close = float(r["close"])
+
+    if monday_open is None or friday_close is None or monday_open == 0:
+        return None, "missing"
+
+    change_pct = (friday_close / monday_open - 1.0) * 100.0
+    return change_pct, "ok_mt"
+
+
 def try_load_marketcap_map(path: Optional[str]) -> Dict[str, Tuple[Optional[float], Optional[int]]]:
     if path is None:
         for guess in ("market_watch_symbols_enriched_yahoo.xlsx", "market_watch_symbols_enriched_yahoo.csv"):
@@ -510,6 +541,8 @@ def create_workbook_template() -> Workbook:
         "YahooUpsidePct",
         "YahooRatingKey",
         "YahooRatingMean",
+        "LastWeekMonFriChangePct",
+        "LastWeekMonFriStatus",
     ]
 
     ws.append(headers)
@@ -577,6 +610,7 @@ def build_dashboard(wb: Workbook):
             "NewsScore": get(row, "NewsScore(0-50)"),
             "TechScore": get(row, "TechScore(0-50)"),
             "YahooScore": get(row, "YahooScore(-20..20)"),
+            "LastWeekMonFriChangePct": get(row, "LastWeekMonFriChangePct"),
         })
 
     def write_section(title, start_row, cols, rows):
@@ -620,6 +654,28 @@ def build_dashboard(wb: Workbook):
         r,
         ["Rank", "Ticker", "TotalScore(0-100)", "Signal", "MarketCapUSD", "NewsScore(0-50)", "TechScore(0-50)", "YahooScore(-20..20)"],
         top_total_rows
+    )
+
+    # Největší 20 propadů za minulý týden (pondělí -> pátek)
+    biggest_weekly_drops = sorted(
+        [d for d in data if d["LastWeekMonFriChangePct"] is not None and float(d["LastWeekMonFriChangePct"]) < 0],
+        key=lambda x: float(x["LastWeekMonFriChangePct"])
+    )[:20]
+    biggest_weekly_drops_rows = []
+    for i, d in enumerate(biggest_weekly_drops, 1):
+        biggest_weekly_drops_rows.append({
+            "Rank": i,
+            "Ticker": d["Ticker"],
+            "LastWeekMonFriChangePct": f"{float(d['LastWeekMonFriChangePct']):.2f}%",
+            "TotalScore(0-100)": d["TotalScore"],
+            "Signal": d["Signal"],
+        })
+
+    r = write_section(
+        "Top 20 nejvetsi propady minuly tyden (Po-Pa, %)",
+        r,
+        ["Rank", "Ticker", "LastWeekMonFriChangePct", "TotalScore(0-100)", "Signal"],
+        biggest_weekly_drops_rows
     )
 
     # Top 20 by MarketCap
@@ -728,6 +784,7 @@ def main():
             tech_score = 0.0
 
         yahoo_score, ydetails, ystatus = yahoo_details_and_score(sym, logger=logger)
+        last_week_drop_pct, last_week_drop_status = last_week_monday_friday_change_pct(mt5, sym)
 
         total = compute_total_score_macro_logic(news_score, tech_score, yahoo_score)
         signal = signal_from_total_score_macro_logic(total)
@@ -760,6 +817,8 @@ def main():
             ydetails.get("YahooUpsidePct"),
             ydetails.get("YahooRatingKey"),
             ydetails.get("YahooRatingMean"),
+            round(last_week_drop_pct, 2) if last_week_drop_pct is not None else None,
+            last_week_drop_status,
         ])
 
     print("\nStep 4/4: SAVE workbook ...")
