@@ -26,13 +26,14 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import logging
 import math
 import os
 import re
 import sys
 import time
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import openpyxl
 from openpyxl import Workbook
@@ -69,6 +70,17 @@ SOURCES = [
     {"source": "PR Newswire", "type": "press releases", "paywall": "free", "info_level": 3, "template": "", "notes": "Bez RSS v šabloně – zatím ručně"},
     {"source": "Business Wire", "type": "press releases", "paywall": "free", "info_level": 3, "template": "", "notes": "Bez RSS v šabloně – zatím ručně"},
 ]
+
+
+
+
+def setup_logging() -> logging.Logger:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s | %(levelname)s | %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+    return logging.getLogger("refresh_news")
 
 
 def now_local_naive() -> dt.datetime:
@@ -216,7 +228,77 @@ def tech_score_from_mt5(mt5, symbol: str) -> Tuple[Optional[float], Dict[str, Op
     return score, {"Close": close, "MA20": ma20, "MA50": ma50, "RSI14": rsi14}, "ok_mt"
 
 
-def yahoo_details_and_score(symbol: str) -> Tuple[float, Dict[str, Optional[float]], str]:
+
+
+def tech_score_from_yfinance(symbol: str, logger: Optional[logging.Logger] = None) -> Tuple[Optional[float], Dict[str, Optional[float]], str]:
+    try:
+        import yfinance as yf
+    except Exception:
+        return None, {"Close": None, "MA20": None, "MA50": None, "RSI14": None}, "missing_yf"
+
+    try:
+        hist = yf.Ticker(symbol).history(period="12mo", interval="1d")
+        closes = []
+        for _, row in hist.iterrows():
+            c = row.get("Close")
+            if c is None:
+                continue
+            try:
+                closes.append(float(c))
+            except Exception:
+                continue
+
+        if len(closes) < 60:
+            return None, {"Close": None, "MA20": None, "MA50": None, "RSI14": None}, "missing_yf"
+
+        close = closes[-1]
+        ma20 = sma(closes, 20)
+        ma50 = sma(closes, 50)
+        rsi14 = rsi(closes, 14)
+
+        score = 0.0
+
+        if ma20 is not None and ma50 is not None:
+            if ma20 > ma50:
+                score += 12
+            else:
+                score += 4
+            if close > ma20:
+                score += 8
+            else:
+                score += 2
+
+        if rsi14 is not None:
+            if 45 <= rsi14 <= 65:
+                score += 15
+            elif 35 <= rsi14 < 45 or 65 < rsi14 <= 75:
+                score += 10
+            elif 25 <= rsi14 < 35 or 75 < rsi14 <= 85:
+                score += 6
+            else:
+                score += 3
+
+        if ma20 is not None:
+            dist = (close - ma20) / ma20 * 100.0
+            if dist >= 8:
+                score += 2
+            elif dist >= 3:
+                score += 6
+            elif dist >= -3:
+                score += 10
+            elif dist >= -8:
+                score += 6
+            else:
+                score += 2
+
+        score = max(0.0, min(50.0, score))
+        return score, {"Close": close, "MA20": ma20, "MA50": ma50, "RSI14": rsi14}, "ok_yf_tech"
+    except Exception as e:
+        if logger:
+            logger.warning("Tech fallback (yfinance) missing for %s: %s", symbol, e)
+        return None, {"Close": None, "MA20": None, "MA50": None, "RSI14": None}, "missing_yf"
+
+def yahoo_details_and_score(symbol: str, logger: Optional[logging.Logger] = None) -> Tuple[float, Dict[str, Optional[float]], str]:
     try:
         import yfinance as yf
     except Exception as e:
@@ -272,7 +354,9 @@ def yahoo_details_and_score(symbol: str) -> Tuple[float, Dict[str, Optional[floa
             "YahooRatingMean": float(reco) if reco is not None else None,
         }
         return score, details, "ok_yf"
-    except Exception:
+    except Exception as e:
+        if logger:
+            logger.warning("Yahoo data missing for %s: %s", symbol, e)
         return 0.0, {"YahooPrice": None, "YahooTarget": None, "YahooUpsidePct": None, "YahooRatingKey": None, "YahooRatingMean": None}, "missing"
 
 
@@ -301,7 +385,47 @@ def source_weight(info_level: int) -> float:
     return 0.5 + (float(info_level) / 5.0) * 1.5
 
 
-def fetch_rss_items_for_ticker(ticker: str, max_per_source: int = 12) -> List[NewsItem]:
+
+
+def ticker_candidates(ticker: str) -> List[str]:
+    t = (ticker or "").strip().upper()
+    if not t:
+        return []
+
+    candidates = {t}
+    if "." in t:
+        candidates.add(t.replace(".", "-"))
+        candidates.add(t.replace(".", ""))
+    if "-" in t:
+        candidates.add(t.replace("-", "."))
+        candidates.add(t.replace("-", ""))
+
+    return sorted(candidates)
+
+
+def entry_mentions_ticker(entry, ticker: str) -> bool:
+    text_parts = [
+        str(getattr(entry, "title", "") or ""),
+        str(getattr(entry, "summary", "") or ""),
+        str(getattr(entry, "link", "") or ""),
+    ]
+    text = " ".join(text_parts).upper()
+
+    for candidate in ticker_candidates(ticker):
+        token = candidate.upper()
+        if f" {token} " in f" {text} ":
+            return True
+        if f"({token})" in text or f":{token}" in text or f"/{token}" in text:
+            return True
+    return False
+
+
+def fetch_rss_items_for_ticker(
+    ticker: str,
+    max_per_source: int = 12,
+    logger: Optional[logging.Logger] = None,
+    source_health: Optional[Dict[str, Dict[str, Any]]] = None,
+) -> List[NewsItem]:
     try:
         import feedparser
     except Exception as e:
@@ -310,34 +434,72 @@ def fetch_rss_items_for_ticker(ticker: str, max_per_source: int = 12) -> List[Ne
     items: List[NewsItem] = []
 
     for src in SOURCES:
+        source_name = str(src.get("source") or "unknown")
         template = (src.get("template") or "").strip()
-        if "{ticker}" not in template:
+        if not template:
             continue
 
-        url = template.format(ticker=ticker)
-        feed = feedparser.parse(url)
+        if source_health is not None:
+            state = source_health.setdefault(source_name, {"failures": 0, "disabled": False, "warned_disabled": False})
+            if state.get("disabled"):
+                if logger and not state.get("warned_disabled"):
+                    logger.info("RSS source disabled for this run: %s", source_name)
+                    state["warned_disabled"] = True
+                continue
 
-        if getattr(feed, "bozo", False) and getattr(feed, "bozo_exception", None):
-            continue
+        urls = []
+        if "{ticker}" in template:
+            for c in ticker_candidates(ticker):
+                urls.append(template.format(ticker=c))
+        else:
+            urls.append(template)
 
-        info_level = int(src.get("info_level") or 3)
-        w = source_weight(info_level)
+        seen_links = set()
 
-        entries = getattr(feed, "entries", []) or []
-        for e in entries[:max_per_source]:
-            title = getattr(e, "title", "") or ""
-            link = getattr(e, "link", "") or ""
-            pub = parse_published_dt(e)
-            items.append(
-                NewsItem(
-                    ticker=ticker,
-                    source=str(src.get("source")),
-                    title=title,
-                    link=link,
-                    published_utc=pub,
-                    weight=w,
+        for url in urls:
+            feed = feedparser.parse(url)
+
+            if getattr(feed, "bozo", False) and getattr(feed, "bozo_exception", None):
+                if source_health is not None:
+                    state = source_health.setdefault(source_name, {"failures": 0, "disabled": False, "warned_disabled": False})
+                    state["failures"] += 1
+                    if state["failures"] >= 3:
+                        state["disabled"] = True
+                if logger:
+                    logger.warning("RSS parse issue for %s (%s): %s", ticker, source_name, getattr(feed, "bozo_exception", "unknown"))
+                continue
+
+            info_level = int(src.get("info_level") or 3)
+            w = source_weight(info_level)
+
+            entries = getattr(feed, "entries", []) or []
+            taken = 0
+            for e in entries:
+                if taken >= max_per_source:
+                    break
+
+                if "{ticker}" not in template and not entry_mentions_ticker(e, ticker):
+                    continue
+
+                title = getattr(e, "title", "") or ""
+                link = getattr(e, "link", "") or ""
+                if link and link in seen_links:
+                    continue
+                if link:
+                    seen_links.add(link)
+
+                pub = parse_published_dt(e)
+                items.append(
+                    NewsItem(
+                        ticker=ticker,
+                        source=str(src.get("source")),
+                        title=title,
+                        link=link,
+                        published_utc=pub,
+                        weight=w,
+                    )
                 )
-            )
+                taken += 1
 
     return items
 
@@ -382,6 +544,37 @@ def signal_from_total_score_macro_logic(total_0_100: float) -> str:
     if total_0_100 >= 40:
         return "SELL"
     return "STRONG SELL"
+
+
+def last_week_monday_friday_change_pct(mt5, symbol: str) -> Tuple[Optional[float], str]:
+    rates = mt5_copy_rates(mt5, symbol, mt5.TIMEFRAME_D1, 40)
+    if rates is None or len(rates) == 0:
+        return None, "missing"
+
+    today = now_local_naive().date()
+    this_monday = today - dt.timedelta(days=today.weekday())
+    last_monday = this_monday - dt.timedelta(days=7)
+    last_friday = last_monday + dt.timedelta(days=4)
+
+    monday_open = None
+    friday_close = None
+
+    for r in rates:
+        bar_date = dt.datetime.fromtimestamp(int(r["time"])).date()
+        if bar_date < last_monday or bar_date > last_friday:
+            continue
+
+        if bar_date.weekday() == 0 and monday_open is None:
+            monday_open = float(r["open"])
+
+        if bar_date.weekday() == 4:
+            friday_close = float(r["close"])
+
+    if monday_open is None or friday_close is None or monday_open == 0:
+        return None, "missing"
+
+    change_pct = (friday_close / monday_open - 1.0) * 100.0
+    return change_pct, "ok_mt"
 
 
 def try_load_marketcap_map(path: Optional[str]) -> Dict[str, Tuple[Optional[float], Optional[int]]]:
@@ -494,6 +687,9 @@ def create_workbook_template() -> Workbook:
         "YahooUpsidePct",
         "YahooRatingKey",
         "YahooRatingMean",
+        "LastWeekMonFriChangePct",
+        "LastWeekMonFriDropPctText",
+        "LastWeekMonFriStatus",
     ]
 
     ws.append(headers)
@@ -561,6 +757,7 @@ def build_dashboard(wb: Workbook):
             "NewsScore": get(row, "NewsScore(0-50)"),
             "TechScore": get(row, "TechScore(0-50)"),
             "YahooScore": get(row, "YahooScore(-20..20)"),
+            "LastWeekMonFriChangePct": get(row, "LastWeekMonFriChangePct"),
         })
 
     def write_section(title, start_row, cols, rows):
@@ -604,6 +801,28 @@ def build_dashboard(wb: Workbook):
         r,
         ["Rank", "Ticker", "TotalScore(0-100)", "Signal", "MarketCapUSD", "NewsScore(0-50)", "TechScore(0-50)", "YahooScore(-20..20)"],
         top_total_rows
+    )
+
+    # Největší 20 propadů za minulý týden (pondělí -> pátek)
+    biggest_weekly_drops = sorted(
+        [d for d in data if d["LastWeekMonFriChangePct"] is not None and float(d["LastWeekMonFriChangePct"]) < 0],
+        key=lambda x: float(x["LastWeekMonFriChangePct"])
+    )[:20]
+    biggest_weekly_drops_rows = []
+    for i, d in enumerate(biggest_weekly_drops, 1):
+        biggest_weekly_drops_rows.append({
+            "Rank": i,
+            "Ticker": d["Ticker"],
+            "LastWeekMonFriChangePct": f"{float(d['LastWeekMonFriChangePct']):.2f}%",
+            "TotalScore(0-100)": d["TotalScore"],
+            "Signal": d["Signal"],
+        })
+
+    r = write_section(
+        "Top 20 nejvetsi propady minuly tyden (Po-Pa, %)",
+        r,
+        ["Rank", "Ticker", "LastWeekMonFriChangePct", "TotalScore(0-100)", "Signal"],
+        biggest_weekly_drops_rows
     )
 
     # Top 20 by MarketCap
@@ -655,6 +874,8 @@ def build_dashboard(wb: Workbook):
 
 
 def main():
+    logger = setup_logging()
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--outdir", default=".", help="Kam uložit výstupní Excel (default: aktuální složka)")
     parser.add_argument("--marketcap", default=None, help="Volitelný soubor s marketcap/rank (xlsx/csv)")
@@ -662,14 +883,14 @@ def main():
 
     env = load_env_from_code_env("code.env")
     if env:
-        print(f"ENV: loaded {len(env)} vars from code.env")
+        logger.info("ENV: loaded %s vars from code.env", len(env))
 
     outdir = args.outdir
     os.makedirs(outdir, exist_ok=True)
 
     cap_map = try_load_marketcap_map(args.marketcap)
     if cap_map:
-        print(f"MarketCap: loaded {len(cap_map)} symbols from file")
+        logger.info("MarketCap: loaded %s symbols from file", len(cap_map))
 
     print("Step 1/4: MT5 watchlist symbols ...")
     mt5 = mt5_connect()
@@ -679,12 +900,14 @@ def main():
     print("Step 2/4: Collect RSS news (supported sources only) ...")
     now_utc = dt.datetime.now(dt.timezone.utc)
     all_items: Dict[str, List[NewsItem]] = {}
+    source_health: Dict[str, Dict[str, Any]] = {}
     n = len(symbols)
     for i, sym in enumerate(symbols, 1):
         print_bar("RSS", i, n)
         try:
-            items = fetch_rss_items_for_ticker(sym, max_per_source=10)
-        except Exception:
+            items = fetch_rss_items_for_ticker(sym, max_per_source=10, logger=logger, source_health=source_health)
+        except RuntimeError as e:
+            logger.error("RSS unavailable for %s: %s", sym, e)
             items = []
         all_items[sym] = items
 
@@ -706,9 +929,12 @@ def main():
 
         tech_score, tech_details, tech_status = tech_score_from_mt5(mt5, sym)
         if tech_score is None:
+            tech_score, tech_details, tech_status = tech_score_from_yfinance(sym, logger=logger)
+        if tech_score is None:
             tech_score = 0.0
 
-        yahoo_score, ydetails, ystatus = yahoo_details_and_score(sym)
+        yahoo_score, ydetails, ystatus = yahoo_details_and_score(sym, logger=logger)
+        last_week_drop_pct, last_week_drop_status = last_week_monday_friday_change_pct(mt5, sym)
 
         total = compute_total_score_macro_logic(news_score, tech_score, yahoo_score)
         signal = signal_from_total_score_macro_logic(total)
@@ -741,6 +967,9 @@ def main():
             ydetails.get("YahooUpsidePct"),
             ydetails.get("YahooRatingKey"),
             ydetails.get("YahooRatingMean"),
+            round(last_week_drop_pct, 2) if last_week_drop_pct is not None else None,
+            f"{last_week_drop_pct:.2f}%" if last_week_drop_pct is not None else None,
+            last_week_drop_status,
         ])
 
     print("\nStep 4/4: SAVE workbook ...")
