@@ -449,7 +449,17 @@ def fetch_rss_items_for_ticker(
         seen_links = set()
 
         for url in urls:
-            feed = feedparser.parse(url)
+            try:
+                feed = feedparser.parse(url)
+            except Exception as e:
+                if source_health is not None:
+                    state = source_health.setdefault(source_name, {"failures": 0, "disabled": False, "warned_disabled": False})
+                    state["failures"] += 1
+                    if state["failures"] >= 3:
+                        state["disabled"] = True
+                if logger:
+                    logger.warning("RSS fetch error for %s (%s): %s", ticker, source_name, e)
+                continue
 
             if getattr(feed, "bozo", False) and getattr(feed, "bozo_exception", None):
                 if source_health is not None:
