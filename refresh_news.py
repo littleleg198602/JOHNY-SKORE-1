@@ -46,21 +46,21 @@ from openpyxl.styles import Alignment, Font
 
 SOURCES = [
     {"source": "Česká národní banka (OAM + krátké pozice)", "type": "regulator filings", "paywall": "free", "info_level": 5, "template": "", "notes": "S1: veřejné OAM/krátké pozice, převážně HTML/app scraping"},
-    {"source": "Burza cenných papírů Praha (PSE)", "type": "exchange news + ZIP", "paywall": "partial", "info_level": 4, "template": "https://www.pse.cz/en/news", "notes": "S2: news HTML + PL.zip (price list), respektovat časová okna"},
+    {"source": "Burza cenných papírů Praha (PSE)", "type": "exchange news + ZIP", "paywall": "partial", "info_level": 4, "template": "", "notes": "S2: news HTML + PL.zip (price list), respektovat časová okna"},
     {"source": "ESMA (FIRDS/FITRS)", "type": "EU regulatory datasets", "paywall": "free", "info_level": 5, "template": "https://registers.esma.europa.eu/solr/esma_registers_firds_files/select?q=*&wt=xml&start=0&rows=100", "notes": "S3: SOLR listing + download XML/ZIP, vhodné cache/polling"},
     {"source": "ECB (RSS + MID)", "type": "macro + publications", "paywall": "free", "info_level": 5, "template": "https://www.ecb.europa.eu/rss/press.html", "notes": "S4: oficiální ECB RSS (makro/press/speeches)"},
-    {"source": "API info-financiere (FR OAM)", "type": "regulatory API", "paywall": "free", "info_level": 4, "template": "https://info-financiere.gouv.fr/api/explore/v2.1/catalog/datasets", "notes": "S5: otevřené API, limit cca 10k volání/IP/den"},
+    {"source": "API info-financiere (FR OAM)", "type": "regulatory API", "paywall": "free", "info_level": 4, "template": "", "notes": "S5: otevřené API, limit cca 10k volání/IP/den"},
     {"source": "SEC EDGAR + SEC RSS", "type": "filings + regulator news", "paywall": "free", "info_level": 5, "template": "https://www.sec.gov/news/pressreleases.rss", "notes": "S6: SEC veřejná data; povinný User-Agent u API volání"},
     {"source": "NasdaqTrader Trade Halts", "type": "halts RSS", "paywall": "free", "info_level": 4, "template": "https://www.nasdaqtrader.com/rss.aspx?feed=tradehalts", "notes": "S7: doporučeno nedotazovat častěji než 1x/min"},
-    {"source": "NYSE Trade Halts", "type": "halts CSV", "paywall": "free", "info_level": 4, "template": "https://www.nyse.com/api/trade-halts/current/download", "notes": "S8: přímý CSV endpoint (current halts)"},
-    {"source": "FINRA Short Volume", "type": "short-sale files", "paywall": "free", "info_level": 4, "template": "https://www.finra.org/finra-data/browse-catalog/short-sale-volume-data", "notes": "S9: veřejné listingy + TXT soubory na CDN"},
-    {"source": "GDELT DOC API", "type": "global news aggregator", "paywall": "free", "info_level": 3, "template": "https://api.gdeltproject.org/api/v2/doc/doc?query={ticker}&mode=artlist&format=json", "notes": "S10: API pro monitoring témat/událostí"},
+    {"source": "NYSE Trade Halts", "type": "halts CSV", "paywall": "free", "info_level": 4, "template": "", "notes": "S8: přímý CSV endpoint (current halts)"},
+    {"source": "FINRA Short Volume", "type": "short-sale files", "paywall": "free", "info_level": 4, "template": "", "notes": "S9: veřejné listingy + TXT soubory na CDN"},
+    {"source": "GDELT DOC API", "type": "global news aggregator", "paywall": "free", "info_level": 3, "template": "", "notes": "S10: API pro monitoring témat/událostí"},
     {"source": "Common Crawl CC-NEWS", "type": "bulk dataset", "paywall": "free", "info_level": 3, "template": "", "notes": "S11: vhodné pro backtesty, vyšší integrační náročnost"},
     {"source": "GlobeNewswire", "type": "press releases", "paywall": "free", "info_level": 3, "template": "https://www.globenewswire.com/RssFeed/orgclass/1/feedTitle/GlobeNewswire%20-%20News%20about%20Public%20Companies", "notes": "S12: RSS/JSON widget feed, může mít throttling"},
     {"source": "PR Newswire", "type": "press releases", "paywall": "free", "info_level": 3, "template": "https://www.prnewswire.com/rss/news-releases-list.rss", "notes": "S13: RSS rozcestník + tematické kanály"},
-    {"source": "Business Wire", "type": "press releases", "paywall": "free", "info_level": 3, "template": "https://www.businesswire.com/portal/site/home/news/", "notes": "S14: newsroom/feed options"},
-    {"source": "Patria.cz", "type": "financial news CZ", "paywall": "free", "info_level": 3, "template": "https://www.patria.cz/rss.html", "notes": "S15: české ekonomické RSS kanály"},
-    {"source": "Akcie.cz", "type": "financial news CZ", "paywall": "partial", "info_level": 2, "template": "https://www.akcie.cz/moje-akcie/rss/", "notes": "S16: RSS kanály, část může vyžadovat login"},
+    {"source": "Business Wire", "type": "press releases", "paywall": "free", "info_level": 3, "template": "", "notes": "S14: newsroom/feed options"},
+    {"source": "Patria.cz", "type": "financial news CZ", "paywall": "free", "info_level": 3, "template": "", "notes": "S15: české ekonomické RSS kanály"},
+    {"source": "Akcie.cz", "type": "financial news CZ", "paywall": "partial", "info_level": 2, "template": "", "notes": "S16: RSS kanály, část může vyžadovat login"},
 ]
 
 
@@ -417,6 +417,7 @@ def fetch_rss_items_for_ticker(
     max_per_source: int = 12,
     logger: Optional[logging.Logger] = None,
     source_health: Optional[Dict[str, Dict[str, Any]]] = None,
+    shared_feed_cache: Optional[Dict[str, Any]] = None,
 ) -> List[NewsItem]:
     try:
         import feedparser
@@ -449,17 +450,26 @@ def fetch_rss_items_for_ticker(
         seen_links = set()
 
         for url in urls:
-            try:
-                feed = feedparser.parse(url)
-            except Exception as e:
-                if source_health is not None:
-                    state = source_health.setdefault(source_name, {"failures": 0, "disabled": False, "warned_disabled": False})
-                    state["failures"] += 1
-                    if state["failures"] >= 3:
-                        state["disabled"] = True
-                if logger:
-                    logger.warning("RSS fetch error for %s (%s): %s", ticker, source_name, e)
-                continue
+            feed = None
+            cache_key = None
+            if shared_feed_cache is not None and "{ticker}" not in template:
+                cache_key = f"{source_name}|{url}"
+                feed = shared_feed_cache.get(cache_key)
+
+            if feed is None:
+                try:
+                    feed = feedparser.parse(url)
+                except Exception as e:
+                    if source_health is not None:
+                        state = source_health.setdefault(source_name, {"failures": 0, "disabled": False, "warned_disabled": False})
+                        state["failures"] += 1
+                        if state["failures"] >= 3:
+                            state["disabled"] = True
+                    if logger:
+                        logger.warning("RSS fetch error for %s (%s): %s", ticker, source_name, e)
+                    continue
+                if cache_key is not None and shared_feed_cache is not None:
+                    shared_feed_cache[cache_key] = feed
 
             if getattr(feed, "bozo", False) and getattr(feed, "bozo_exception", None):
                 if source_health is not None:
@@ -1011,11 +1021,18 @@ def main():
     now_utc = dt.datetime.now(dt.timezone.utc)
     all_items: Dict[str, List[NewsItem]] = {}
     source_health: Dict[str, Dict[str, Any]] = {}
+    shared_feed_cache: Dict[str, Any] = {}
     n = len(symbols)
     for i, sym in enumerate(symbols, 1):
         print_bar("RSS", i, n)
         try:
-            items = fetch_rss_items_for_ticker(sym, max_per_source=10, logger=logger, source_health=source_health)
+            items = fetch_rss_items_for_ticker(
+                sym,
+                max_per_source=10,
+                logger=logger,
+                source_health=source_health,
+                shared_feed_cache=shared_feed_cache,
+            )
         except RuntimeError as e:
             logger.error("RSS unavailable for %s: %s", sym, e)
             items = []
