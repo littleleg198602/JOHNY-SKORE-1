@@ -140,6 +140,10 @@ RSS_FETCH_TIMEOUT_S = 4
 RSS_TICKER_BUDGET_S = 15
 
 
+RSS_DISABLE_AFTER_CONSECUTIVE_FAILURES = 10
+RSS_NEVER_DISABLE_SOURCES = {"Yahoo Finance", "Seeking Alpha"}
+
+
 def fetch_url_bytes(url: str, timeout_s: int = RSS_FETCH_TIMEOUT_S) -> bytes:
     req = urllib.request.Request(
         url,
@@ -522,7 +526,7 @@ def fetch_rss_items_for_ticker(
             continue
 
         if source_health is not None:
-            state = source_health.setdefault(source_name, {"failures": 0, "disabled": False, "warned_disabled": False})
+            state = source_health.setdefault(source_name, {"failures": 0, "disabled": False, "warned_disabled": False, "success": 0})
             if state.get("disabled"):
                 if logger and not state.get("warned_disabled"):
                     logger.info("RSS source disabled for this run: %s", source_name)
@@ -563,9 +567,9 @@ def fetch_rss_items_for_ticker(
                     feed = feedparser.parse(raw)
                 except Exception as e:
                     if source_health is not None:
-                        state = source_health.setdefault(source_name, {"failures": 0, "disabled": False, "warned_disabled": False})
+                        state = source_health.setdefault(source_name, {"failures": 0, "disabled": False, "warned_disabled": False, "success": 0})
                         state["failures"] += 1
-                        if state["failures"] >= 3:
+                        if source_name not in RSS_NEVER_DISABLE_SOURCES and state["failures"] >= RSS_DISABLE_AFTER_CONSECUTIVE_FAILURES:
                             state["disabled"] = True
                     if logger:
                         logger.warning("RSS fetch error for %s (%s): %s", ticker, source_name, e)
@@ -573,11 +577,16 @@ def fetch_rss_items_for_ticker(
                 if cache_key is not None and shared_feed_cache is not None:
                     shared_feed_cache[cache_key] = feed
 
+            if source_health is not None:
+                state = source_health.setdefault(source_name, {"failures": 0, "disabled": False, "warned_disabled": False, "success": 0})
+                state["success"] += 1
+                state["failures"] = 0
+
             if getattr(feed, "bozo", False) and getattr(feed, "bozo_exception", None):
                 if source_health is not None:
-                    state = source_health.setdefault(source_name, {"failures": 0, "disabled": False, "warned_disabled": False})
+                    state = source_health.setdefault(source_name, {"failures": 0, "disabled": False, "warned_disabled": False, "success": 0})
                     state["failures"] += 1
-                    if state["failures"] >= 3:
+                    if source_name not in RSS_NEVER_DISABLE_SOURCES and state["failures"] >= RSS_DISABLE_AFTER_CONSECUTIVE_FAILURES:
                         state["disabled"] = True
                 if logger:
                     logger.warning("RSS parse issue for %s (%s): %s", ticker, source_name, getattr(feed, "bozo_exception", "unknown"))
@@ -587,6 +596,8 @@ def fetch_rss_items_for_ticker(
             w = source_weight(info_level)
 
             entries = getattr(feed, "entries", []) or []
+            if logger and source_name == "Yahoo Finance" and len(entries) == 0:
+                logger.info("Yahoo Finance returned 0 RSS entries for %s", ticker)
             taken = 0
             for e in entries:
                 if taken >= max_per_source:
