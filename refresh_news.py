@@ -32,6 +32,7 @@ import os
 import re
 import sys
 import time
+import urllib.request
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -45,6 +46,30 @@ from openpyxl.styles import Alignment, Font
 # -----------------------------
 
 SOURCES = [
+    # Původní tržní zdroje (uživatel je chce vidět v Sources)
+    {"source": "Reuters", "type": "newswire", "paywall": "paid/limited", "info_level": 4, "template": "", "notes": "Ruční / API / vyžaduje přihlášení"},
+    {"source": "Bloomberg", "type": "news+analysis", "paywall": "paid", "info_level": 5, "template": "", "notes": "Ruční / API / vyžaduje přihlášení"},
+    {"source": "The Wall Street Journal", "type": "business news", "paywall": "paid", "info_level": 4, "template": "", "notes": "Ruční / API / vyžaduje přihlášení"},
+    {"source": "Financial Times", "type": "business+macro", "paywall": "paid", "info_level": 4, "template": "", "notes": "Ruční / API / vyžaduje přihlášení"},
+    {"source": "Barron's", "type": "investing", "paywall": "paid/limited", "info_level": 4, "template": "", "notes": "Ruční / API / vyžaduje přihlášení"},
+    {"source": "Morningstar", "type": "fundamentals", "paywall": "limited", "info_level": 4, "template": "", "notes": "Ruční / API / vyžaduje přihlášení"},
+    {"source": "MarketWatch", "type": "news+commentary", "paywall": "limited", "info_level": 3, "template": "", "notes": "Ruční / API / vyžaduje přihlášení"},
+    {"source": "Yahoo Finance", "type": "aggregator", "paywall": "limited", "info_level": 3, "template": "https://finance.yahoo.com/rss/headline?s={ticker}", "notes": "RSS podporováno skriptem"},
+    {"source": "Seeking Alpha", "type": "analysis (contributors)", "paywall": "limited", "info_level": 3, "template": "https://seekingalpha.com/api/sa/combined/{ticker}.xml", "notes": "RSS podporováno skriptem"},
+    {"source": "Zacks", "type": "ratings+earnings", "paywall": "limited", "info_level": 3, "template": "", "notes": "Ruční / API / vyžaduje přihlášení"},
+    {"source": "TheStreet", "type": "news+commentary", "paywall": "limited", "info_level": 2, "template": "", "notes": "Ruční / API / vyžaduje přihlášení"},
+    {"source": "Investing.com", "type": "news+transcripts", "paywall": "limited", "info_level": 3, "template": "", "notes": "Ruční / API / vyžaduje přihlášení"},
+    {"source": "Benzinga", "type": "news+market moving", "paywall": "limited", "info_level": 2, "template": "https://www.benzinga.com/markets/feed", "notes": "RSS podporováno skriptem"},
+    {"source": "TipRanks", "type": "analyst aggregation", "paywall": "limited", "info_level": 2, "template": "", "notes": "Ruční / API / vyžaduje přihlášení"},
+    {"source": "The Motley Fool", "type": "retail stock-picks", "paywall": "limited", "info_level": 2, "template": "", "notes": "RSS podporováno skriptem"},
+    {"source": "StockAnalysis.com", "type": "fundamentals+news", "paywall": "free", "info_level": 3, "template": "", "notes": "Bez RSS v šabloně – zatím ručně"},
+    {"source": "StockTitan", "type": "news+press releases", "paywall": "free", "info_level": 3, "template": "", "notes": "Bez RSS v šabloně – zatím ručně"},
+    {"source": "FINVIZ", "type": "screener+news links", "paywall": "free", "info_level": 2, "template": "", "notes": "Bez RSS v šabloně – zatím ručně"},
+    {"source": "Nasdaq.com", "type": "news+data", "paywall": "free", "info_level": 3, "template": "", "notes": "Bez RSS v šabloně – zatím ručně"},
+    {"source": "MarketScreener", "type": "news+fundamentals", "paywall": "free", "info_level": 3, "template": "", "notes": "Bez RSS v šabloně – zatím ručně"},
+    {"source": "CompaniesMarketCap", "type": "fundamentals", "paywall": "free", "info_level": 2, "template": "", "notes": "Bez RSS v šabloně – zatím ručně"},
+
+    # Regulatorní / institucionální zdroje (S1-S16)
     {"source": "Česká národní banka (OAM + krátké pozice)", "type": "regulator filings", "paywall": "free", "info_level": 5, "template": "", "notes": "S1: veřejné OAM/krátké pozice, převážně HTML/app scraping"},
     {"source": "Burza cenných papírů Praha (PSE)", "type": "exchange news + ZIP", "paywall": "partial", "info_level": 4, "template": "", "notes": "S2: news HTML + PL.zip (price list), respektovat časová okna"},
     {"source": "ESMA (FIRDS/FITRS)", "type": "EU regulatory datasets", "paywall": "free", "info_level": 5, "template": "https://registers.esma.europa.eu/solr/esma_registers_firds_files/select?q=*&wt=xml&start=0&rows=100", "notes": "S3: SOLR listing + download XML/ZIP, vhodné cache/polling"},
@@ -90,6 +115,51 @@ def slugify_filename(s: str) -> str:
     return s.strip("_")
 
 
+def is_likely_rss_feed_url(url: str) -> bool:
+    u = (url or "").strip().lower()
+    if not u.startswith(("http://", "https://")):
+        return False
+    # Feedparser funguje spolehlivě hlavně na RSS/Atom feed URL, ne na HTML/CSV/JSON API.
+    feed_markers = ("rss", "atom", "feed", ".xml", "xml?")
+    return any(m in u for m in feed_markers)
+
+
+RSS_ENABLED_SOURCES = {
+    "Yahoo Finance",
+    "Seeking Alpha",
+    "Benzinga",
+    "GlobeNewswire",
+    "PR Newswire",
+    "SEC EDGAR + SEC RSS",
+    "NasdaqTrader Trade Halts",
+    "ECB (RSS + MID)",
+}
+
+
+def fetch_url_bytes(url: str, timeout_s: int = 8) -> bytes:
+    req = urllib.request.Request(
+        url,
+        headers={"User-Agent": "JOHNY-MarketChecker/1.0 (+rss-fetch)"},
+    )
+    with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+        return resp.read()
+
+
+
+
+def log_progress_heartbeat(logger: logging.Logger, phase: str, i: int, n: int, t0: float):
+    elapsed = max(0.0, time.time() - t0)
+    avg = (elapsed / i) if i > 0 else 0.0
+    eta = max(0.0, (n - i) * avg)
+    logger.info(
+        "%s progress %s/%s (%.1f%%) | elapsed %.1fs | ETA %.1fs | script bezi dal, nepanikarit",
+        phase,
+        i,
+        n,
+        (i / n * 100.0) if n else 100.0,
+        elapsed,
+        eta,
+    )
 def print_bar(prefix: str, i: int, n: int, width: int = 26):
     if n <= 0:
         return
@@ -428,8 +498,12 @@ def fetch_rss_items_for_ticker(
 
     for src in SOURCES:
         source_name = str(src.get("source") or "unknown")
+        if source_name not in RSS_ENABLED_SOURCES:
+            continue
         template = (src.get("template") or "").strip()
         if not template:
+            continue
+        if not is_likely_rss_feed_url(template):
             continue
 
         if source_health is not None:
@@ -458,7 +532,8 @@ def fetch_rss_items_for_ticker(
 
             if feed is None:
                 try:
-                    feed = feedparser.parse(url)
+                    raw = fetch_url_bytes(url, timeout_s=8)
+                    feed = feedparser.parse(raw)
                 except Exception as e:
                     if source_health is not None:
                         state = source_health.setdefault(source_name, {"failures": 0, "disabled": False, "warned_disabled": False})
@@ -1023,8 +1098,11 @@ def main():
     source_health: Dict[str, Dict[str, Any]] = {}
     shared_feed_cache: Dict[str, Any] = {}
     n = len(symbols)
+    t0_rss = time.time()
     for i, sym in enumerate(symbols, 1):
         print_bar("RSS", i, n)
+        if i == 1 or i % 5 == 0 or i == n:
+            log_progress_heartbeat(logger, "RSS", i, n, t0_rss)
         try:
             items = fetch_rss_items_for_ticker(
                 sym,
@@ -1043,8 +1121,11 @@ def main():
     ws = wb["Signals"]
     ws_art = wb["Articles"]
 
+    t0_sig = time.time()
     for i, sym in enumerate(symbols, 1):
         print_bar("Signals", i, n)
+        if i == 1 or i % 5 == 0 or i == n:
+            log_progress_heartbeat(logger, "Signals", i, n, t0_sig)
 
         items = all_items.get(sym, []) or []
         for it in items[:50]:
