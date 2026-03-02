@@ -136,7 +136,11 @@ RSS_ENABLED_SOURCES = {
 }
 
 
-def fetch_url_bytes(url: str, timeout_s: int = 8) -> bytes:
+RSS_FETCH_TIMEOUT_S = 4
+RSS_TICKER_BUDGET_S = 15
+
+
+def fetch_url_bytes(url: str, timeout_s: int = RSS_FETCH_TIMEOUT_S) -> bytes:
     req = urllib.request.Request(
         url,
         headers={"User-Agent": "JOHNY-MarketChecker/1.0 (+rss-fetch)"},
@@ -495,8 +499,19 @@ def fetch_rss_items_for_ticker(
         raise RuntimeError("Chybí feedparser. Nainstaluj: pip install feedparser") from e
 
     items: List[NewsItem] = []
+    t0_ticker = time.time()
 
     for src in SOURCES:
+        elapsed_ticker = time.time() - t0_ticker
+        if elapsed_ticker >= RSS_TICKER_BUDGET_S:
+            if logger:
+                logger.warning(
+                    "RSS ticker budget reached for %s (%.1fs >= %ss); moving to next ticker",
+                    ticker,
+                    elapsed_ticker,
+                    RSS_TICKER_BUDGET_S,
+                )
+            break
         source_name = str(src.get("source") or "unknown")
         if source_name not in RSS_ENABLED_SOURCES:
             continue
@@ -524,6 +539,18 @@ def fetch_rss_items_for_ticker(
         seen_links = set()
 
         for url in urls:
+            elapsed_ticker = time.time() - t0_ticker
+            if elapsed_ticker >= RSS_TICKER_BUDGET_S:
+                if logger:
+                    logger.warning(
+                        "RSS ticker budget reached for %s inside source %s (%.1fs >= %ss)",
+                        ticker,
+                        source_name,
+                        elapsed_ticker,
+                        RSS_TICKER_BUDGET_S,
+                    )
+                break
+
             feed = None
             cache_key = None
             if shared_feed_cache is not None and "{ticker}" not in template:
@@ -532,7 +559,7 @@ def fetch_rss_items_for_ticker(
 
             if feed is None:
                 try:
-                    raw = fetch_url_bytes(url, timeout_s=8)
+                    raw = fetch_url_bytes(url, timeout_s=RSS_FETCH_TIMEOUT_S)
                     feed = feedparser.parse(raw)
                 except Exception as e:
                     if source_health is not None:
