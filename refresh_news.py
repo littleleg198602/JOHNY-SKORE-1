@@ -1354,12 +1354,22 @@ def main():
     shared_feed_cache: Dict[str, Any] = {}
     n = len(symbols)
     t0_rss = time.time()
+    logger.info("News mode: hybrid (Yahoo API + RSS across all configured feed templates)")
     for i, sym in enumerate(symbols, 1):
         print_bar("RSS", i, n)
         if i == 1 or i % 5 == 0 or i == n:
             log_progress_heartbeat(logger, "RSS", i, n, t0_rss)
+
+        items: List[NewsItem] = []
+
+        # 1) Yahoo API zprávy (typicky nejširší pokrytí tickerů)
+        yf_items = fetch_yfinance_news_fallback(sym, max_items=20, logger=logger)
+        if yf_items:
+            items.extend(yf_items)
+
+        # 2) RSS zdroje podle všech šablon v SOURCES (s timeouty/rozpočtem)
         try:
-            items = fetch_rss_items_for_ticker(
+            rss_items = fetch_rss_items_for_ticker(
                 sym,
                 max_per_source=10,
                 logger=logger,
@@ -1368,13 +1378,20 @@ def main():
             )
         except RuntimeError as e:
             logger.error("RSS unavailable for %s: %s", sym, e)
-            items = []
+            rss_items = []
+
+        if rss_items:
+            seen = {str(it.link) for it in items if getattr(it, "link", None)}
+            for it in rss_items:
+                lk = str(it.link or "")
+                if lk and lk in seen:
+                    continue
+                if lk:
+                    seen.add(lk)
+                items.append(it)
 
         if not items:
-            yf_items = fetch_yfinance_news_fallback(sym, max_items=10, logger=logger)
-            if yf_items:
-                logger.info("Yahoo API news fallback used for %s: %s items", sym, len(yf_items))
-                items = yf_items
+            logger.warning("No news found for %s (Yahoo API + RSS)", sym)
 
         all_items[sym] = items
 
