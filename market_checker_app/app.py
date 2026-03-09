@@ -1,7 +1,15 @@
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
 import pandas as pd
 import streamlit as st
+
+# Umozni spusteni jak z rootu repo, tak z adresare market_checker_app/
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 from market_checker_app.collectors.mt5_client import MT5Client
 from market_checker_app.config import APP_DESCRIPTION, APP_TITLE, DEFAULT_MARKETCAP_PATH, DEFAULT_MAX_RSS_ITEMS_PER_SOURCE, DEFAULT_OUTDIR
