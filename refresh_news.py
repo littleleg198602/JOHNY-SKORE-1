@@ -25,6 +25,7 @@ Volitelné argumenty:
 from __future__ import annotations
 
 import argparse
+import glob
 import datetime as dt
 import logging
 import math
@@ -32,12 +33,13 @@ import os
 import re
 import sys
 import time
+import urllib.request
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
 import openpyxl
 from openpyxl import Workbook
-from openpyxl.styles import Alignment, Font
+from openpyxl.styles import Alignment, Font, PatternFill
 
 
 # -----------------------------
@@ -45,6 +47,7 @@ from openpyxl.styles import Alignment, Font
 # -----------------------------
 
 SOURCES = [
+    # Původní tržní zdroje (uživatel je chce vidět v Sources)
     {"source": "Reuters", "type": "newswire", "paywall": "paid/limited", "info_level": 4, "template": "", "notes": "Ruční / API / vyžaduje přihlášení"},
     {"source": "Bloomberg", "type": "news+analysis", "paywall": "paid", "info_level": 5, "template": "", "notes": "Ruční / API / vyžaduje přihlášení"},
     {"source": "The Wall Street Journal", "type": "business news", "paywall": "paid", "info_level": 4, "template": "", "notes": "Ruční / API / vyžaduje přihlášení"},
@@ -66,9 +69,24 @@ SOURCES = [
     {"source": "Nasdaq.com", "type": "news+data", "paywall": "free", "info_level": 3, "template": "", "notes": "Bez RSS v šabloně – zatím ručně"},
     {"source": "MarketScreener", "type": "news+fundamentals", "paywall": "free", "info_level": 3, "template": "", "notes": "Bez RSS v šabloně – zatím ručně"},
     {"source": "CompaniesMarketCap", "type": "fundamentals", "paywall": "free", "info_level": 2, "template": "", "notes": "Bez RSS v šabloně – zatím ručně"},
-    {"source": "SEC EDGAR", "type": "filings", "paywall": "free", "info_level": 5, "template": "", "notes": "Bez RSS v šabloně – zatím ručně"},
-    {"source": "PR Newswire", "type": "press releases", "paywall": "free", "info_level": 3, "template": "", "notes": "Bez RSS v šabloně – zatím ručně"},
-    {"source": "Business Wire", "type": "press releases", "paywall": "free", "info_level": 3, "template": "", "notes": "Bez RSS v šabloně – zatím ručně"},
+
+    # Regulatorní / institucionální zdroje (S1-S16)
+    {"source": "Česká národní banka (OAM + krátké pozice)", "type": "regulator filings", "paywall": "free", "info_level": 5, "template": "", "notes": "S1: veřejné OAM/krátké pozice, převážně HTML/app scraping"},
+    {"source": "Burza cenných papírů Praha (PSE)", "type": "exchange news + ZIP", "paywall": "partial", "info_level": 4, "template": "", "notes": "S2: news HTML + PL.zip (price list), respektovat časová okna"},
+    {"source": "ESMA (FIRDS/FITRS)", "type": "EU regulatory datasets", "paywall": "free", "info_level": 5, "template": "https://registers.esma.europa.eu/solr/esma_registers_firds_files/select?q=*&wt=xml&start=0&rows=100", "notes": "S3: SOLR listing + download XML/ZIP, vhodné cache/polling"},
+    {"source": "ECB (RSS + MID)", "type": "macro + publications", "paywall": "free", "info_level": 5, "template": "https://www.ecb.europa.eu/rss/press.html", "notes": "S4: oficiální ECB RSS (makro/press/speeches)"},
+    {"source": "API info-financiere (FR OAM)", "type": "regulatory API", "paywall": "free", "info_level": 4, "template": "", "notes": "S5: otevřené API, limit cca 10k volání/IP/den"},
+    {"source": "SEC EDGAR + SEC RSS", "type": "filings + regulator news", "paywall": "free", "info_level": 5, "template": "https://www.sec.gov/news/pressreleases.rss", "notes": "S6: SEC veřejná data; povinný User-Agent u API volání"},
+    {"source": "NasdaqTrader Trade Halts", "type": "halts RSS", "paywall": "free", "info_level": 4, "template": "https://www.nasdaqtrader.com/rss.aspx?feed=tradehalts", "notes": "S7: doporučeno nedotazovat častěji než 1x/min"},
+    {"source": "NYSE Trade Halts", "type": "halts CSV", "paywall": "free", "info_level": 4, "template": "", "notes": "S8: přímý CSV endpoint (current halts)"},
+    {"source": "FINRA Short Volume", "type": "short-sale files", "paywall": "free", "info_level": 4, "template": "", "notes": "S9: veřejné listingy + TXT soubory na CDN"},
+    {"source": "GDELT DOC API", "type": "global news aggregator", "paywall": "free", "info_level": 3, "template": "", "notes": "S10: API pro monitoring témat/událostí"},
+    {"source": "Common Crawl CC-NEWS", "type": "bulk dataset", "paywall": "free", "info_level": 3, "template": "", "notes": "S11: vhodné pro backtesty, vyšší integrační náročnost"},
+    {"source": "GlobeNewswire", "type": "press releases", "paywall": "free", "info_level": 3, "template": "https://www.globenewswire.com/RssFeed/orgclass/1/feedTitle/GlobeNewswire%20-%20News%20about%20Public%20Companies", "notes": "S12: RSS/JSON widget feed, může mít throttling"},
+    {"source": "PR Newswire", "type": "press releases", "paywall": "free", "info_level": 3, "template": "https://www.prnewswire.com/rss/news-releases-list.rss", "notes": "S13: RSS rozcestník + tematické kanály"},
+    {"source": "Business Wire", "type": "press releases", "paywall": "free", "info_level": 3, "template": "", "notes": "S14: newsroom/feed options"},
+    {"source": "Patria.cz", "type": "financial news CZ", "paywall": "free", "info_level": 3, "template": "", "notes": "S15: české ekonomické RSS kanály"},
+    {"source": "Akcie.cz", "type": "financial news CZ", "paywall": "partial", "info_level": 2, "template": "", "notes": "S16: RSS kanály, část může vyžadovat login"},
 ]
 
 
@@ -98,6 +116,59 @@ def slugify_filename(s: str) -> str:
     return s.strip("_")
 
 
+def is_likely_rss_feed_url(url: str) -> bool:
+    u = (url or "").strip().lower()
+    if not u.startswith(("http://", "https://")):
+        return False
+    # Feedparser funguje spolehlivě hlavně na RSS/Atom feed URL, ne na HTML/CSV/JSON API.
+    feed_markers = ("rss", "atom", "feed", ".xml", "xml?")
+    return any(m in u for m in feed_markers)
+
+
+RSS_ENABLED_SOURCES = {
+    "Yahoo Finance",
+    "Seeking Alpha",
+    "Benzinga",
+    "GlobeNewswire",
+    "PR Newswire",
+    "SEC EDGAR + SEC RSS",
+    "NasdaqTrader Trade Halts",
+    "ECB (RSS + MID)",
+}
+
+
+RSS_FETCH_TIMEOUT_S = 4
+RSS_TICKER_BUDGET_S = 15
+
+
+RSS_DISABLE_AFTER_CONSECUTIVE_FAILURES = 10
+RSS_NEVER_DISABLE_SOURCES = {"Yahoo Finance", "Seeking Alpha"}
+
+
+def fetch_url_bytes(url: str, timeout_s: int = RSS_FETCH_TIMEOUT_S) -> bytes:
+    req = urllib.request.Request(
+        url,
+        headers={"User-Agent": "JOHNY-MarketChecker/1.0 (+rss-fetch)"},
+    )
+    with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+        return resp.read()
+
+
+
+
+def log_progress_heartbeat(logger: logging.Logger, phase: str, i: int, n: int, t0: float):
+    elapsed = max(0.0, time.time() - t0)
+    avg = (elapsed / i) if i > 0 else 0.0
+    eta = max(0.0, (n - i) * avg)
+    logger.info(
+        "%s progress %s/%s (%.1f%%) | elapsed %.1fs | ETA %.1fs | script bezi dal, nepanikarit",
+        phase,
+        i,
+        n,
+        (i / n * 100.0) if n else 100.0,
+        elapsed,
+        eta,
+    )
 def print_bar(prefix: str, i: int, n: int, width: int = 26):
     if n <= 0:
         return
@@ -425,6 +496,7 @@ def fetch_rss_items_for_ticker(
     max_per_source: int = 12,
     logger: Optional[logging.Logger] = None,
     source_health: Optional[Dict[str, Dict[str, Any]]] = None,
+    shared_feed_cache: Optional[Dict[str, Any]] = None,
 ) -> List[NewsItem]:
     try:
         import feedparser
@@ -432,15 +504,30 @@ def fetch_rss_items_for_ticker(
         raise RuntimeError("Chybí feedparser. Nainstaluj: pip install feedparser") from e
 
     items: List[NewsItem] = []
+    t0_ticker = time.time()
 
     for src in SOURCES:
+        elapsed_ticker = time.time() - t0_ticker
+        if elapsed_ticker >= RSS_TICKER_BUDGET_S:
+            if logger:
+                logger.warning(
+                    "RSS ticker budget reached for %s (%.1fs >= %ss); moving to next ticker",
+                    ticker,
+                    elapsed_ticker,
+                    RSS_TICKER_BUDGET_S,
+                )
+            break
         source_name = str(src.get("source") or "unknown")
+        if source_name not in RSS_ENABLED_SOURCES:
+            continue
         template = (src.get("template") or "").strip()
         if not template:
             continue
+        if not is_likely_rss_feed_url(template):
+            continue
 
         if source_health is not None:
-            state = source_health.setdefault(source_name, {"failures": 0, "disabled": False, "warned_disabled": False})
+            state = source_health.setdefault(source_name, {"failures": 0, "disabled": False, "warned_disabled": False, "success": 0})
             if state.get("disabled"):
                 if logger and not state.get("warned_disabled"):
                     logger.info("RSS source disabled for this run: %s", source_name)
@@ -457,13 +544,50 @@ def fetch_rss_items_for_ticker(
         seen_links = set()
 
         for url in urls:
-            feed = feedparser.parse(url)
+            elapsed_ticker = time.time() - t0_ticker
+            if elapsed_ticker >= RSS_TICKER_BUDGET_S:
+                if logger:
+                    logger.warning(
+                        "RSS ticker budget reached for %s inside source %s (%.1fs >= %ss)",
+                        ticker,
+                        source_name,
+                        elapsed_ticker,
+                        RSS_TICKER_BUDGET_S,
+                    )
+                break
+
+            feed = None
+            cache_key = None
+            if shared_feed_cache is not None and "{ticker}" not in template:
+                cache_key = f"{source_name}|{url}"
+                feed = shared_feed_cache.get(cache_key)
+
+            if feed is None:
+                try:
+                    raw = fetch_url_bytes(url, timeout_s=RSS_FETCH_TIMEOUT_S)
+                    feed = feedparser.parse(raw)
+                except Exception as e:
+                    if source_health is not None:
+                        state = source_health.setdefault(source_name, {"failures": 0, "disabled": False, "warned_disabled": False, "success": 0})
+                        state["failures"] += 1
+                        if source_name not in RSS_NEVER_DISABLE_SOURCES and state["failures"] >= RSS_DISABLE_AFTER_CONSECUTIVE_FAILURES:
+                            state["disabled"] = True
+                    if logger:
+                        logger.warning("RSS fetch error for %s (%s): %s", ticker, source_name, e)
+                    continue
+                if cache_key is not None and shared_feed_cache is not None:
+                    shared_feed_cache[cache_key] = feed
+
+            if source_health is not None:
+                state = source_health.setdefault(source_name, {"failures": 0, "disabled": False, "warned_disabled": False, "success": 0})
+                state["success"] += 1
+                state["failures"] = 0
 
             if getattr(feed, "bozo", False) and getattr(feed, "bozo_exception", None):
                 if source_health is not None:
-                    state = source_health.setdefault(source_name, {"failures": 0, "disabled": False, "warned_disabled": False})
+                    state = source_health.setdefault(source_name, {"failures": 0, "disabled": False, "warned_disabled": False, "success": 0})
                     state["failures"] += 1
-                    if state["failures"] >= 3:
+                    if source_name not in RSS_NEVER_DISABLE_SOURCES and state["failures"] >= RSS_DISABLE_AFTER_CONSECUTIVE_FAILURES:
                         state["disabled"] = True
                 if logger:
                     logger.warning("RSS parse issue for %s (%s): %s", ticker, source_name, getattr(feed, "bozo_exception", "unknown"))
@@ -473,6 +597,8 @@ def fetch_rss_items_for_ticker(
             w = source_weight(info_level)
 
             entries = getattr(feed, "entries", []) or []
+            if logger and source_name == "Yahoo Finance" and len(entries) == 0:
+                logger.info("Yahoo Finance returned 0 RSS entries for %s", ticker)
             taken = 0
             for e in entries:
                 if taken >= max_per_source:
@@ -500,6 +626,49 @@ def fetch_rss_items_for_ticker(
                     )
                 )
                 taken += 1
+
+    return items
+
+
+def fetch_yfinance_news_fallback(ticker: str, max_items: int = 12, logger: Optional[logging.Logger] = None) -> List[NewsItem]:
+    try:
+        import yfinance as yf
+    except Exception:
+        return []
+
+    items: List[NewsItem] = []
+    try:
+        raw_news = getattr(yf.Ticker(ticker), "news", []) or []
+        w = source_weight(3)
+        taken = 0
+        for n in raw_news:
+            if taken >= max_items:
+                break
+            title = str(n.get("title") or "")
+            link = str(n.get("link") or "")
+            pub = None
+            ts = n.get("providerPublishTime")
+            if ts is not None:
+                try:
+                    pub = dt.datetime.fromtimestamp(int(ts), tz=dt.timezone.utc)
+                except Exception:
+                    pub = None
+
+            items.append(
+                NewsItem(
+                    ticker=ticker,
+                    source="Yahoo Finance API",
+                    title=title,
+                    link=link,
+                    published_utc=pub,
+                    weight=w,
+                )
+            )
+            taken += 1
+    except Exception as e:
+        if logger:
+            logger.warning("Yahoo API fallback news failed for %s: %s", ticker, e)
+        return []
 
     return items
 
@@ -546,35 +715,85 @@ def signal_from_total_score_macro_logic(total_0_100: float) -> str:
     return "STRONG SELL"
 
 
-def last_week_monday_friday_change_pct(mt5, symbol: str) -> Tuple[Optional[float], str]:
-    rates = mt5_copy_rates(mt5, symbol, mt5.TIMEFRAME_D1, 40)
-    if rates is None or len(rates) == 0:
-        return None, "missing"
+def _change_pct_between_dates(mt5, symbol: str, start_date: dt.date, end_date: dt.date, yf_period: str = "6mo") -> Tuple[Optional[float], str]:
+    def calc_change_from_bars(bars: List[Tuple[dt.date, float, float]]) -> Optional[float]:
+        if not bars:
+            return None
+        bars.sort(key=lambda x: x[0])
+        first_day_open = bars[0][1]
+        last_day_close = bars[-1][2]
+        if first_day_open == 0:
+            return None
+        return (last_day_close / first_day_open - 1.0) * 100.0
 
+    # 1) Primárně MT5
+    mt5_bars: List[Tuple[dt.date, float, float]] = []
+    try:
+        dt_from = dt.datetime.combine(start_date, dt.time.min)
+        dt_to = dt.datetime.combine(end_date + dt.timedelta(days=1), dt.time.min)
+        rates = mt5.copy_rates_range(symbol, mt5.TIMEFRAME_D1, dt_from, dt_to)
+        if rates is not None:
+            for r in rates:
+                bar_date = dt.datetime.fromtimestamp(int(r["time"])).date()
+                if start_date <= bar_date <= end_date:
+                    mt5_bars.append((bar_date, float(r["open"]), float(r["close"])))
+    except Exception:
+        mt5_bars = []
+
+    change_mt5 = calc_change_from_bars(mt5_bars)
+    if change_mt5 is not None:
+        return change_mt5, "ok_mt"
+
+    # 2) Fallback: yfinance
+    try:
+        import yfinance as yf
+
+        hist = yf.Ticker(symbol).history(period=yf_period, interval="1d")
+        yf_bars: List[Tuple[dt.date, float, float]] = []
+        for idx, row in hist.iterrows():
+            bar_date = idx.date()
+            if not (start_date <= bar_date <= end_date):
+                continue
+            o = row.get("Open")
+            c = row.get("Close")
+            if o is None or c is None:
+                continue
+            try:
+                yf_bars.append((bar_date, float(o), float(c)))
+            except Exception:
+                continue
+
+        change_yf = calc_change_from_bars(yf_bars)
+        if change_yf is not None:
+            return change_yf, "ok_yf"
+    except Exception:
+        pass
+
+    return None, "missing"
+
+
+def last_week_monday_friday_change_pct(mt5, symbol: str) -> Tuple[Optional[float], str]:
     today = now_local_naive().date()
     this_monday = today - dt.timedelta(days=today.weekday())
     last_monday = this_monday - dt.timedelta(days=7)
     last_friday = last_monday + dt.timedelta(days=4)
 
-    monday_open = None
-    friday_close = None
+    # Některé trhy/symboly nemusí mít svíčku přesně v pondělí/pátek
+    # (svátky, specifické obchodní hodiny). Proto se bere první + poslední
+    # dostupný obchodní den v okně Po-Pá minulého týdne.
+    return _change_pct_between_dates(mt5, symbol, last_monday, last_friday, yf_period="1mo")
 
-    for r in rates:
-        bar_date = dt.datetime.fromtimestamp(int(r["time"])).date()
-        if bar_date < last_monday or bar_date > last_friday:
-            continue
 
-        if bar_date.weekday() == 0 and monday_open is None:
-            monday_open = float(r["open"])
+def last_1m_change_pct(mt5, symbol: str) -> Tuple[Optional[float], str]:
+    end_date = now_local_naive().date()
+    start_date = end_date - dt.timedelta(days=30)
+    return _change_pct_between_dates(mt5, symbol, start_date, end_date, yf_period="6mo")
 
-        if bar_date.weekday() == 4:
-            friday_close = float(r["close"])
 
-    if monday_open is None or friday_close is None or monday_open == 0:
-        return None, "missing"
-
-    change_pct = (friday_close / monday_open - 1.0) * 100.0
-    return change_pct, "ok_mt"
+def last_3m_change_pct(mt5, symbol: str) -> Tuple[Optional[float], str]:
+    end_date = now_local_naive().date()
+    start_date = end_date - dt.timedelta(days=90)
+    return _change_pct_between_dates(mt5, symbol, start_date, end_date, yf_period="1y")
 
 
 def try_load_marketcap_map(path: Optional[str]) -> Dict[str, Tuple[Optional[float], Optional[int]]]:
@@ -690,6 +909,12 @@ def create_workbook_template() -> Workbook:
         "LastWeekMonFriChangePct",
         "LastWeekMonFriDropPctText",
         "LastWeekMonFriStatus",
+        "Last1MChangePct",
+        "Last1MChangePctText",
+        "Last1MStatus",
+        "Last3MChangePct",
+        "Last3MChangePctText",
+        "Last3MStatus",
     ]
 
     ws.append(headers)
@@ -718,6 +943,179 @@ def create_workbook_template() -> Workbook:
 # =========================
 # ✅ ADDED: Dashboard builder
 # =========================
+def find_previous_workbook_path(outdir: str) -> Optional[str]:
+    pattern = os.path.join(outdir, "market_checker_watchlist_*.xlsx")
+    candidates = [p for p in glob.glob(pattern) if os.path.isfile(p)]
+    if not candidates:
+        return None
+    candidates.sort(key=lambda x: os.path.getmtime(x), reverse=True)
+    return os.path.abspath(candidates[0])
+
+
+def _read_signals_rows(ws) -> List[Dict[str, Any]]:
+    headers = [ws.cell(1, c).value for c in range(1, ws.max_column + 1)]
+    idx = {str(h): i for i, h in enumerate(headers) if h}
+
+    def get(row, name, default=None):
+        col = idx.get(name)
+        if col is None:
+            return default
+        return row[col]
+
+    rows: List[Dict[str, Any]] = []
+    for r in range(2, ws.max_row + 1):
+        row = [ws.cell(r, c).value for c in range(1, ws.max_column + 1)]
+        ticker = get(row, "Ticker")
+        if not ticker:
+            continue
+        rows.append({
+            "Ticker": ticker,
+            "UpdatedAt": get(row, "UpdatedAt"),
+            "TotalScore": get(row, "TotalScore(0-100)"),
+            "Signal": get(row, "Signal"),
+            "NewsScore": get(row, "NewsScore(0-50)"),
+            "TechScore": get(row, "TechScore(0-50)"),
+            "YahooScore": get(row, "YahooScore(-20..20)"),
+            "LastWeekMonFriChangePct": get(row, "LastWeekMonFriChangePct"),
+            "Last1MChangePct": get(row, "Last1MChangePct"),
+            "Last3MChangePct": get(row, "Last3MChangePct"),
+        })
+    return rows
+
+
+def build_delta_vs_previous(wb: Workbook, outdir: str, logger: logging.Logger):
+    if "DeltaVsPrev" in wb.sheetnames:
+        ws = wb["DeltaVsPrev"]
+        ws.delete_rows(1, ws.max_row)
+    else:
+        ws = wb.create_sheet("DeltaVsPrev")
+
+    prev_path = find_previous_workbook_path(outdir)
+    if not prev_path:
+        ws["A1"] = "No previous workbook found in outdir for comparison."
+        ws["A1"].font = Font(bold=True)
+        return
+
+    try:
+        prev_wb = openpyxl.load_workbook(prev_path, data_only=True)
+        if "Signals" not in prev_wb.sheetnames:
+            ws["A1"] = f"Previous workbook has no Signals sheet: {prev_path}"
+            return
+
+        prev_rows = _read_signals_rows(prev_wb["Signals"])
+    except Exception as e:
+        ws["A1"] = f"Could not read previous workbook: {e}"
+        logger.warning("DeltaVsPrev: failed to load previous workbook %s: %s", prev_path, e)
+        return
+
+    curr_rows = _read_signals_rows(wb["Signals"])
+    prev_map = {str(r["Ticker"]): r for r in prev_rows}
+
+    ws["A1"] = "Comparison vs previous workbook"
+    ws["B1"] = os.path.basename(prev_path)
+    ws["A1"].font = Font(bold=True)
+
+    cols = [
+        "Ticker",
+        "PrevUpdatedAt",
+        "CurrUpdatedAt",
+        "PrevTotal",
+        "CurrTotal",
+        "DeltaTotal",
+        "PrevSignal",
+        "CurrSignal",
+        "SignalChanged",
+        "DeltaNews",
+        "DeltaTech",
+        "DeltaYahoo",
+        "DeltaLastWeekPct",
+        "DeltaLast1MPct",
+        "DeltaLast3MPct",
+    ]
+    ws.append(cols)
+    for c in range(1, len(cols) + 1):
+        ws.cell(2, c).font = Font(bold=True)
+        ws.cell(2, c).alignment = Alignment(horizontal="center")
+
+    def to_f(v):
+        try:
+            if v is None or v == "":
+                return None
+            return float(v)
+        except Exception:
+            return None
+
+    rows_out = []
+    for cur in curr_rows:
+        t = str(cur["Ticker"])
+        prev = prev_map.get(t)
+        if not prev:
+            continue
+
+        p_total = to_f(prev["TotalScore"])
+        c_total = to_f(cur["TotalScore"])
+        d_total = (c_total - p_total) if p_total is not None and c_total is not None else None
+
+        def delta(field):
+            pv = to_f(prev.get(field))
+            cv = to_f(cur.get(field))
+            if pv is None or cv is None:
+                return None
+            return cv - pv
+
+        rows_out.append({
+            "Ticker": t,
+            "PrevUpdatedAt": prev.get("UpdatedAt"),
+            "CurrUpdatedAt": cur.get("UpdatedAt"),
+            "PrevTotal": p_total,
+            "CurrTotal": c_total,
+            "DeltaTotal": d_total,
+            "PrevSignal": prev.get("Signal"),
+            "CurrSignal": cur.get("Signal"),
+            "SignalChanged": "YES" if prev.get("Signal") != cur.get("Signal") else "",
+            "DeltaNews": delta("NewsScore"),
+            "DeltaTech": delta("TechScore"),
+            "DeltaYahoo": delta("YahooScore"),
+            "DeltaLastWeekPct": delta("LastWeekMonFriChangePct"),
+            "DeltaLast1MPct": delta("Last1MChangePct"),
+            "DeltaLast3MPct": delta("Last3MChangePct"),
+        })
+
+    rows_out.sort(key=lambda x: abs(x["DeltaTotal"]) if x["DeltaTotal"] is not None else -1, reverse=True)
+
+    for rr in rows_out:
+        ws.append([rr.get(c) for c in cols])
+
+    green = PatternFill(fill_type="solid", fgColor="C6EFCE")
+    red = PatternFill(fill_type="solid", fgColor="FFC7CE")
+    yellow = PatternFill(fill_type="solid", fgColor="FFEB9C")
+
+    delta_cols = {
+        "DeltaTotal": cols.index("DeltaTotal") + 1,
+        "DeltaNews": cols.index("DeltaNews") + 1,
+        "DeltaTech": cols.index("DeltaTech") + 1,
+        "DeltaYahoo": cols.index("DeltaYahoo") + 1,
+        "DeltaLastWeekPct": cols.index("DeltaLastWeekPct") + 1,
+        "DeltaLast1MPct": cols.index("DeltaLast1MPct") + 1,
+        "DeltaLast3MPct": cols.index("DeltaLast3MPct") + 1,
+    }
+    changed_col = cols.index("SignalChanged") + 1
+
+    for r in range(3, ws.max_row + 1):
+        for _, c in delta_cols.items():
+            v = ws.cell(r, c).value
+            if isinstance(v, (int, float)):
+                if v > 0:
+                    ws.cell(r, c).fill = green
+                elif v < 0:
+                    ws.cell(r, c).fill = red
+
+        if ws.cell(r, changed_col).value == "YES":
+            ws.cell(r, changed_col).fill = yellow
+
+    ws.freeze_panes = "A3"
+
+
 def build_dashboard(wb: Workbook):
     # vytvoř / vyčisti sheet
     if "Dashboard" in wb.sheetnames:
@@ -758,6 +1156,11 @@ def build_dashboard(wb: Workbook):
             "TechScore": get(row, "TechScore(0-50)"),
             "YahooScore": get(row, "YahooScore(-20..20)"),
             "LastWeekMonFriChangePct": get(row, "LastWeekMonFriChangePct"),
+            "LastWeekMonFriStatus": get(row, "LastWeekMonFriStatus"),
+            "Last1MChangePct": get(row, "Last1MChangePct"),
+            "Last1MStatus": get(row, "Last1MStatus"),
+            "Last3MChangePct": get(row, "Last3MChangePct"),
+            "Last3MStatus": get(row, "Last3MStatus"),
         })
 
     def write_section(title, start_row, cols, rows):
@@ -816,13 +1219,60 @@ def build_dashboard(wb: Workbook):
             "LastWeekMonFriChangePct": f"{float(d['LastWeekMonFriChangePct']):.2f}%",
             "TotalScore(0-100)": d["TotalScore"],
             "Signal": d["Signal"],
+            "LastWeekMonFriStatus": d["LastWeekMonFriStatus"],
         })
 
     r = write_section(
         "Top 20 nejvetsi propady minuly tyden (Po-Pa, %)",
         r,
-        ["Rank", "Ticker", "LastWeekMonFriChangePct", "TotalScore(0-100)", "Signal"],
+        ["Rank", "Ticker", "LastWeekMonFriChangePct", "TotalScore(0-100)", "Signal", "LastWeekMonFriStatus"],
         biggest_weekly_drops_rows
+    )
+
+    # Největší 20 propadů za poslední měsíc
+    biggest_1m_drops = sorted(
+        [d for d in data if d["Last1MChangePct"] is not None and float(d["Last1MChangePct"]) < 0],
+        key=lambda x: float(x["Last1MChangePct"])
+    )[:20]
+    biggest_1m_drops_rows = []
+    for i, d in enumerate(biggest_1m_drops, 1):
+        biggest_1m_drops_rows.append({
+            "Rank": i,
+            "Ticker": d["Ticker"],
+            "Last1MChangePct": f"{float(d['Last1MChangePct']):.2f}%",
+            "TotalScore(0-100)": d["TotalScore"],
+            "Signal": d["Signal"],
+            "Last1MStatus": d["Last1MStatus"],
+        })
+
+    r = write_section(
+        "Top 20 nejvetsi propady za 1 mesic (%)",
+        r,
+        ["Rank", "Ticker", "Last1MChangePct", "TotalScore(0-100)", "Signal", "Last1MStatus"],
+        biggest_1m_drops_rows
+    )
+
+    # Největší 20 propadů za poslední 3 měsíce
+    biggest_3m_drops = sorted(
+        [d for d in data if d["Last3MChangePct"] is not None and float(d["Last3MChangePct"]) < 0],
+        key=lambda x: float(x["Last3MChangePct"])
+    )[:20]
+    biggest_3m_drops_rows = []
+    for i, d in enumerate(biggest_3m_drops, 1):
+        biggest_3m_drops_rows.append({
+            "Rank": i,
+            "Ticker": d["Ticker"],
+            "Last3MChangePct": f"{float(d['Last3MChangePct']):.2f}%",
+            "TotalScore(0-100)": d["TotalScore"],
+            "Signal": d["Signal"],
+            "Last3MStatus": d["Last3MStatus"],
+        })
+
+    r = write_section(
+        "Top 20 nejvetsi propady za 3 mesice (%)",
+        r,
+        ["Rank", "Ticker", "Last3MChangePct", "TotalScore(0-100)", "Signal", "Last3MStatus"],
+        biggest_3m_drops_rows
     )
 
     # Top 20 by MarketCap
@@ -879,6 +1329,12 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--outdir", default=".", help="Kam uložit výstupní Excel (default: aktuální složka)")
     parser.add_argument("--marketcap", default=None, help="Volitelný soubor s marketcap/rank (xlsx/csv)")
+    parser.add_argument(
+        "--news-mode",
+        default="yahoo_only",
+        choices=["yahoo_only", "yahoo_then_rss", "rss_then_yahoo"],
+        help="Režim sběru news: yahoo_only (default), yahoo_then_rss, rss_then_yahoo",
+    )
     args = parser.parse_args()
 
     env = load_env_from_code_env("code.env")
@@ -901,14 +1357,44 @@ def main():
     now_utc = dt.datetime.now(dt.timezone.utc)
     all_items: Dict[str, List[NewsItem]] = {}
     source_health: Dict[str, Dict[str, Any]] = {}
+    shared_feed_cache: Dict[str, Any] = {}
     n = len(symbols)
+    t0_rss = time.time()
+    logger.info("News mode: %s", args.news_mode)
     for i, sym in enumerate(symbols, 1):
         print_bar("RSS", i, n)
-        try:
-            items = fetch_rss_items_for_ticker(sym, max_per_source=10, logger=logger, source_health=source_health)
-        except RuntimeError as e:
-            logger.error("RSS unavailable for %s: %s", sym, e)
-            items = []
+        if i == 1 or i % 5 == 0 or i == n:
+            log_progress_heartbeat(logger, "RSS", i, n, t0_rss)
+
+        items: List[NewsItem] = []
+
+        if args.news_mode in ("yahoo_only", "yahoo_then_rss"):
+            items = fetch_yfinance_news_fallback(sym, max_items=20, logger=logger)
+            if items and args.news_mode == "yahoo_then_rss":
+                all_items[sym] = items
+                continue
+
+        if args.news_mode in ("rss_then_yahoo", "yahoo_then_rss"):
+            try:
+                rss_items = fetch_rss_items_for_ticker(
+                    sym,
+                    max_per_source=10,
+                    logger=logger,
+                    source_health=source_health,
+                    shared_feed_cache=shared_feed_cache,
+                )
+            except RuntimeError as e:
+                logger.error("RSS unavailable for %s: %s", sym, e)
+                rss_items = []
+
+            if args.news_mode == "rss_then_yahoo":
+                items = rss_items
+                if not items:
+                    items = fetch_yfinance_news_fallback(sym, max_items=20, logger=logger)
+            else:
+                if not items:
+                    items = rss_items
+
         all_items[sym] = items
 
     print("Step 3/4: Compute signals (news + tech + yahoo + marketcap/rank) ...")
@@ -916,8 +1402,11 @@ def main():
     ws = wb["Signals"]
     ws_art = wb["Articles"]
 
+    t0_sig = time.time()
     for i, sym in enumerate(symbols, 1):
         print_bar("Signals", i, n)
+        if i == 1 or i % 5 == 0 or i == n:
+            log_progress_heartbeat(logger, "Signals", i, n, t0_sig)
 
         items = all_items.get(sym, []) or []
         for it in items[:50]:
@@ -935,6 +1424,8 @@ def main():
 
         yahoo_score, ydetails, ystatus = yahoo_details_and_score(sym, logger=logger)
         last_week_drop_pct, last_week_drop_status = last_week_monday_friday_change_pct(mt5, sym)
+        last_1m_drop_pct, last_1m_drop_status = last_1m_change_pct(mt5, sym)
+        last_3m_drop_pct, last_3m_drop_status = last_3m_change_pct(mt5, sym)
 
         total = compute_total_score_macro_logic(news_score, tech_score, yahoo_score)
         signal = signal_from_total_score_macro_logic(total)
@@ -970,6 +1461,12 @@ def main():
             round(last_week_drop_pct, 2) if last_week_drop_pct is not None else None,
             f"{last_week_drop_pct:.2f}%" if last_week_drop_pct is not None else None,
             last_week_drop_status,
+            round(last_1m_drop_pct, 2) if last_1m_drop_pct is not None else None,
+            f"{last_1m_drop_pct:.2f}%" if last_1m_drop_pct is not None else None,
+            last_1m_drop_status,
+            round(last_3m_drop_pct, 2) if last_3m_drop_pct is not None else None,
+            f"{last_3m_drop_pct:.2f}%" if last_3m_drop_pct is not None else None,
+            last_3m_drop_status,
         ])
 
     print("\nStep 4/4: SAVE workbook ...")
@@ -978,6 +1475,7 @@ def main():
     # ✅ ADDED: Build Dashboard
     # =========================
     build_dashboard(wb)
+    build_delta_vs_previous(wb, outdir, logger)
 
     ts = now_local_naive().strftime("%Y%m%d_%H%M%S")
     outname = f"market_checker_watchlist_{ts}.xlsx"
