@@ -4,6 +4,7 @@ import datetime as dt
 import json
 import urllib.parse
 import urllib.request
+from collections.abc import Callable
 from typing import Any
 
 from market_checker_app.analysis.indicators import rsi, sma
@@ -12,8 +13,13 @@ from market_checker_app.models import NewsItem, TechSnapshot, YahooSnapshot
 
 
 class YahooClient:
-    def __init__(self, timeout_s: int = 4) -> None:
+    def __init__(self, timeout_s: int = 4, on_warning: Callable[[str], None] | None = None) -> None:
         self.timeout_s = timeout_s
+        self.on_warning = on_warning
+
+    def _warn(self, message: str) -> None:
+        if self.on_warning:
+            self.on_warning(message)
 
     def _fetch_url_bytes(self, url: str) -> bytes:
         req = urllib.request.Request(url, headers={"User-Agent": "JOHNY-MarketChecker/1.0"})
@@ -49,13 +55,15 @@ class YahooClient:
         try:
             closes = self.history_closes(symbol)
             if len(closes) < 60:
+                self._warn(f"yfinance tech data missing for {symbol} (insufficient history)")
                 return TechSnapshot(score=0.0, status="missing_yf")
             close = closes[-1]
             ma20 = sma(closes, 20)
             ma50 = sma(closes, 50)
             rsi14 = rsi(closes, 14)
             return TechSnapshot(score=tech_score(close, ma20, ma50, rsi14), status="ok_yf_tech", close=close, ma20=ma20, ma50=ma50, rsi14=rsi14)
-        except Exception:
+        except Exception as exc:
+            self._warn(f"yfinance tech snapshot failed for {symbol}: {exc}")
             return TechSnapshot(score=0.0, status="missing_yf")
 
     def yahoo_snapshot(self, symbol: str) -> YahooSnapshot:
@@ -83,7 +91,8 @@ class YahooClient:
                 rating_key=key,
                 rating_mean=float(reco) if reco is not None else None,
             )
-        except Exception:
+        except Exception as exc:
+            self._warn(f"yfinance yahoo snapshot failed for {symbol}: {exc}")
             return YahooSnapshot(score=0.0, status="missing")
 
     def news_fallback(self, ticker: str, max_items: int = 12) -> list[NewsItem]:
@@ -107,15 +116,15 @@ class YahooClient:
 
         try:
             parse(getattr(yf.Ticker(ticker), "news", []) or [], "Yahoo Finance API")
-        except Exception:
-            pass
+        except Exception as exc:
+            self._warn(f"yfinance news failed for {ticker}: {exc}")
 
         try:
             q = urllib.parse.quote(ticker)
             url = f"https://query1.finance.yahoo.com/v1/finance/search?q={q}&quotesCount=1&newsCount={max_items}"
             obj = json.loads(self._fetch_url_bytes(url).decode("utf-8", errors="ignore"))
             parse(obj.get("news") or [], "Yahoo Search API")
-        except Exception:
-            pass
+        except Exception as exc:
+            self._warn(f"Yahoo Search API fallback failed for {ticker}: {exc}")
 
         return items[:max_items]

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
+from collections.abc import Callable
 
 import pandas as pd
 
@@ -19,9 +20,27 @@ from market_checker_app.utils.dates import now_local_naive
 logger = logging.getLogger(__name__)
 
 
-def run_analysis(symbols: list[str], marketcap_path: str | None, max_rss_items_per_source: int) -> RunResult:
+ProgressCallback = Callable[[int, int, str], None]
+WarningCallback = Callable[[str], None]
+
+
+def run_analysis(
+    symbols: list[str],
+    marketcap_path: str | None,
+    max_rss_items_per_source: int,
+    progress_callback: ProgressCallback | None = None,
+    warning_callback: WarningCallback | None = None,
+) -> RunResult:
+    warnings: list[str] = []
+
+    def warn(message: str) -> None:
+        warnings.append(message)
+        logger.warning(message)
+        if warning_callback:
+            warning_callback(message)
+
     mt5 = MT5Client()
-    yahoo = YahooClient()
+    yahoo = YahooClient(on_warning=warn)
     cap_map = load_marketcap_map(marketcap_path)
     source_health: dict = {}
     feed_cache: dict = {}
@@ -35,12 +54,26 @@ def run_analysis(symbols: list[str], marketcap_path: str | None, max_rss_items_p
         mt5.connect()
         mt5_connected = True
     except Exception as exc:
-        logger.warning("MT5 unavailable, using yfinance fallback: %s", exc)
+        warn(f"MT5 unavailable, using yfinance fallback for tech: {exc}")
 
-    for ticker in symbols:
+    total_symbols = len(symbols)
+    for idx, ticker in enumerate(symbols, start=1):
+        if progress_callback:
+            progress_callback(idx - 1, total_symbols, ticker)
+
         yf_news = yahoo.news_fallback(ticker, max_items=20)
-        rss_news = fetch_rss_items_for_ticker(ticker, SOURCES, max_rss_items_per_source, source_health=source_health, shared_feed_cache=feed_cache)
+        rss_news = fetch_rss_items_for_ticker(
+            ticker,
+            SOURCES,
+            max_rss_items_per_source,
+            source_health=source_health,
+            shared_feed_cache=feed_cache,
+            on_warning=warn,
+        )
+
         articles = yf_news + [a for a in rss_news if a.link not in {n.link for n in yf_news if n.link}]
+        if not articles:
+            warn(f"No news found for {ticker} (Yahoo + RSS)")
         all_articles.extend(articles)
 
         n_w, n_v = news_metrics_48h(articles, now_utc)
@@ -53,10 +86,15 @@ def run_analysis(symbols: list[str], marketcap_path: str | None, max_rss_items_p
                 c = closes[-1]
                 ma20, ma50, rsi14 = sma(closes, 20), sma(closes, 50), rsi(closes, 14)
                 tech = TechSnapshot(score=tech_score(c, ma20, ma50, rsi14), status="ok_mt", close=c, ma20=ma20, ma50=ma50, rsi14=rsi14)
+            else:
+                warn(f"MT5 has insufficient D1 history for {ticker}; using yfinance tech fallback")
+
         if tech.status != "ok_mt":
             tech = yahoo.tech_snapshot(ticker)
 
         ysnap = yahoo.yahoo_snapshot(ticker)
+        if ysnap.status != "ok_yf":
+            warn(f"Yahoo snapshot missing for {ticker}")
 
         if mt5_connected:
             lw, lws = last_week_change_pct(mt5, yahoo, ticker)
@@ -89,10 +127,13 @@ def run_analysis(symbols: list[str], marketcap_path: str | None, max_rss_items_p
             )
         )
 
+        if progress_callback:
+            progress_callback(idx, total_symbols, ticker)
+
     if mt5_connected:
         mt5.close()
 
-    return RunResult(signals=rows, articles=all_articles, sources=SOURCES)
+    return RunResult(signals=rows, articles=all_articles, sources=SOURCES, warnings=warnings)
 
 
 def signals_to_df(rows: list[SignalRow]) -> pd.DataFrame:

@@ -96,4 +96,5 @@ class RunResult:
     articles: list[NewsItem] = field(default_factory=list)
     sources: list[dict[str, Any]] = field(default_factory=list)
     delta: list[dict[str, Any]] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
     output_path: str | None = None

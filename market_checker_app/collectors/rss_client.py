@@ -3,6 +3,7 @@ from __future__ import annotations
 import datetime as dt
 import time
 import urllib.request
+from collections.abc import Callable
 
 from market_checker_app.analysis.scoring import source_weight
 from market_checker_app.config import (
@@ -44,10 +45,13 @@ def fetch_rss_items_for_ticker(
     max_per_source: int,
     source_health: dict | None = None,
     shared_feed_cache: dict | None = None,
+    on_warning: Callable[[str], None] | None = None,
 ) -> list[NewsItem]:
     try:
         import feedparser
-    except Exception:
+    except Exception as exc:
+        if on_warning:
+            on_warning(f"RSS parser unavailable: {exc}")
         return []
 
     items: list[NewsItem] = []
@@ -55,6 +59,8 @@ def fetch_rss_items_for_ticker(
 
     for src in sources:
         if time.time() - t0 >= RSS_TICKER_BUDGET_S:
+            if on_warning:
+                on_warning(f"RSS time budget reached for {ticker}; remaining sources skipped")
             break
 
         source_name = str(src.get("source") or "unknown")
@@ -80,11 +86,15 @@ def fetch_rss_items_for_ticker(
                     feed = feedparser.parse(_fetch_url_bytes(url))
                     if cache_key:
                         shared_feed_cache[cache_key] = feed
-                except Exception:
+                except Exception as exc:
+                    if on_warning:
+                        on_warning(f"RSS fetch failed ({source_name}, {ticker}): {exc}")
                     if state:
                         state["failures"] += 1
                         if source_name not in RSS_NEVER_DISABLE_SOURCES and state["failures"] >= RSS_DISABLE_AFTER_CONSECUTIVE_FAILURES:
                             state["disabled"] = True
+                            if on_warning:
+                                on_warning(f"RSS source disabled for this run after repeated failures: {source_name}")
                     continue
 
             w = source_weight(int(src.get("info_level") or 3))
