@@ -630,6 +630,49 @@ def fetch_rss_items_for_ticker(
     return items
 
 
+def fetch_yfinance_news_fallback(ticker: str, max_items: int = 12, logger: Optional[logging.Logger] = None) -> List[NewsItem]:
+    try:
+        import yfinance as yf
+    except Exception:
+        return []
+
+    items: List[NewsItem] = []
+    try:
+        raw_news = getattr(yf.Ticker(ticker), "news", []) or []
+        w = source_weight(3)
+        taken = 0
+        for n in raw_news:
+            if taken >= max_items:
+                break
+            title = str(n.get("title") or "")
+            link = str(n.get("link") or "")
+            pub = None
+            ts = n.get("providerPublishTime")
+            if ts is not None:
+                try:
+                    pub = dt.datetime.fromtimestamp(int(ts), tz=dt.timezone.utc)
+                except Exception:
+                    pub = None
+
+            items.append(
+                NewsItem(
+                    ticker=ticker,
+                    source="Yahoo Finance API",
+                    title=title,
+                    link=link,
+                    published_utc=pub,
+                    weight=w,
+                )
+            )
+            taken += 1
+    except Exception as e:
+        if logger:
+            logger.warning("Yahoo API fallback news failed for %s: %s", ticker, e)
+        return []
+
+    return items
+
+
 def news_metrics_48h(items: List[NewsItem], now_utc: dt.datetime) -> Tuple[float, int]:
     cutoff = now_utc - dt.timedelta(hours=48)
     wsum = 0.0
@@ -1326,6 +1369,13 @@ def main():
         except RuntimeError as e:
             logger.error("RSS unavailable for %s: %s", sym, e)
             items = []
+
+        if not items:
+            yf_items = fetch_yfinance_news_fallback(sym, max_items=10, logger=logger)
+            if yf_items:
+                logger.info("Yahoo API news fallback used for %s: %s items", sym, len(yf_items))
+                items = yf_items
+
         all_items[sym] = items
 
     print("Step 3/4: Compute signals (news + tech + yahoo + marketcap/rank) ...")
