@@ -8,6 +8,8 @@ APP_DESCRIPTION = "Modulární Streamlit aplikace pro news/tech/yahoo scoring z 
 DEFAULT_OUTDIR = Path("./outputs")
 DEFAULT_MARKETCAP_PATH = "market_watch_symbols_enriched_yahoo.xlsx"
 DEFAULT_MAX_RSS_ITEMS_PER_SOURCE = 10
+NEWS_MAX_AGE_DAYS = 30
+NEWS_FALLBACK_MIN_ITEMS = 1
 
 RSS_FETCH_TIMEOUT_S = 4
 RSS_TICKER_BUDGET_S = 15

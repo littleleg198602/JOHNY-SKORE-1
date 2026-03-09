@@ -13,7 +13,7 @@ from market_checker_app.collectors.marketcap_loader import load_marketcap_map
 from market_checker_app.collectors.mt5_client import MT5Client
 from market_checker_app.collectors.rss_client import fetch_rss_items_for_ticker
 from market_checker_app.collectors.yahoo_client import YahooClient
-from market_checker_app.config import SOURCES
+from market_checker_app.config import NEWS_FALLBACK_MIN_ITEMS, NEWS_MAX_AGE_DAYS, SOURCES
 from market_checker_app.models import PerformanceSnapshot, RunResult, SignalRow, TechSnapshot
 from market_checker_app.utils.dates import now_local_naive
 
@@ -22,6 +22,29 @@ logger = logging.getLogger(__name__)
 
 ProgressCallback = Callable[[int, int, str], None]
 WarningCallback = Callable[[str], None]
+
+
+def _filter_recent_articles(items, now_utc: dt.datetime) -> tuple[list, bool]:
+    cutoff = now_utc - dt.timedelta(days=NEWS_MAX_AGE_DAYS)
+    recent = []
+    stale = []
+    for it in items:
+        if it.published_utc is None:
+            recent.append(it)
+        elif it.published_utc >= cutoff:
+            recent.append(it)
+        else:
+            stale.append(it)
+
+    sort_key = lambda x: x.published_utc or dt.datetime.min.replace(tzinfo=dt.timezone.utc)
+    recent.sort(key=sort_key, reverse=True)
+    stale.sort(key=sort_key, reverse=True)
+
+    if recent:
+        return recent, False
+
+    # Pokud za posledni mesic nic neni, vrat alespon posledni stare zpravy
+    return stale[:NEWS_FALLBACK_MIN_ITEMS], True
 
 
 def run_analysis(
@@ -64,6 +87,7 @@ def run_analysis(
 
     total_symbols = len(symbols)
     no_news_count = 0
+    stale_fallback_count = 0
 
     for idx, ticker in enumerate(symbols, start=1):
         if progress_callback:
@@ -79,7 +103,10 @@ def run_analysis(
             on_warning=lambda m: warn(m, dedupe_key=m),
         )
 
-        articles = yf_news + [a for a in rss_news if a.link not in {n.link for n in yf_news if n.link}]
+        articles_merged = yf_news + [a for a in rss_news if a.link not in {n.link for n in yf_news if n.link}]
+        articles, used_stale_fallback = _filter_recent_articles(articles_merged, now_utc)
+        if used_stale_fallback:
+            stale_fallback_count += 1
         if not articles:
             no_news_count += 1
         all_articles.extend(articles)
@@ -140,6 +167,13 @@ def run_analysis(
 
         if progress_callback:
             progress_callback(idx, total_symbols, ticker)
+
+    if stale_fallback_count > 0:
+        msg = f"Used older-news fallback for {stale_fallback_count}/{total_symbols} tickers (no items in last {NEWS_MAX_AGE_DAYS} days)."
+        warnings.append(msg)
+        logger.warning(msg)
+        if warning_callback:
+            warning_callback(msg)
 
     if no_news_count > 0:
         msg = f"No news found for {no_news_count}/{total_symbols} tickers (Yahoo + RSS)."
