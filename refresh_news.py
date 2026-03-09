@@ -25,6 +25,7 @@ Volitelné argumenty:
 from __future__ import annotations
 
 import argparse
+import glob
 import datetime as dt
 import logging
 import math
@@ -38,7 +39,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import openpyxl
 from openpyxl import Workbook
-from openpyxl.styles import Alignment, Font
+from openpyxl.styles import Alignment, Font, PatternFill
 
 
 # -----------------------------
@@ -899,6 +900,179 @@ def create_workbook_template() -> Workbook:
 # =========================
 # ✅ ADDED: Dashboard builder
 # =========================
+def find_previous_workbook_path(outdir: str) -> Optional[str]:
+    pattern = os.path.join(outdir, "market_checker_watchlist_*.xlsx")
+    candidates = [p for p in glob.glob(pattern) if os.path.isfile(p)]
+    if not candidates:
+        return None
+    candidates.sort(key=lambda x: os.path.getmtime(x), reverse=True)
+    return os.path.abspath(candidates[0])
+
+
+def _read_signals_rows(ws) -> List[Dict[str, Any]]:
+    headers = [ws.cell(1, c).value for c in range(1, ws.max_column + 1)]
+    idx = {str(h): i for i, h in enumerate(headers) if h}
+
+    def get(row, name, default=None):
+        col = idx.get(name)
+        if col is None:
+            return default
+        return row[col]
+
+    rows: List[Dict[str, Any]] = []
+    for r in range(2, ws.max_row + 1):
+        row = [ws.cell(r, c).value for c in range(1, ws.max_column + 1)]
+        ticker = get(row, "Ticker")
+        if not ticker:
+            continue
+        rows.append({
+            "Ticker": ticker,
+            "UpdatedAt": get(row, "UpdatedAt"),
+            "TotalScore": get(row, "TotalScore(0-100)"),
+            "Signal": get(row, "Signal"),
+            "NewsScore": get(row, "NewsScore(0-50)"),
+            "TechScore": get(row, "TechScore(0-50)"),
+            "YahooScore": get(row, "YahooScore(-20..20)"),
+            "LastWeekMonFriChangePct": get(row, "LastWeekMonFriChangePct"),
+            "Last1MChangePct": get(row, "Last1MChangePct"),
+            "Last3MChangePct": get(row, "Last3MChangePct"),
+        })
+    return rows
+
+
+def build_delta_vs_previous(wb: Workbook, outdir: str, logger: logging.Logger):
+    if "DeltaVsPrev" in wb.sheetnames:
+        ws = wb["DeltaVsPrev"]
+        ws.delete_rows(1, ws.max_row)
+    else:
+        ws = wb.create_sheet("DeltaVsPrev")
+
+    prev_path = find_previous_workbook_path(outdir)
+    if not prev_path:
+        ws["A1"] = "No previous workbook found in outdir for comparison."
+        ws["A1"].font = Font(bold=True)
+        return
+
+    try:
+        prev_wb = openpyxl.load_workbook(prev_path, data_only=True)
+        if "Signals" not in prev_wb.sheetnames:
+            ws["A1"] = f"Previous workbook has no Signals sheet: {prev_path}"
+            return
+
+        prev_rows = _read_signals_rows(prev_wb["Signals"])
+    except Exception as e:
+        ws["A1"] = f"Could not read previous workbook: {e}"
+        logger.warning("DeltaVsPrev: failed to load previous workbook %s: %s", prev_path, e)
+        return
+
+    curr_rows = _read_signals_rows(wb["Signals"])
+    prev_map = {str(r["Ticker"]): r for r in prev_rows}
+
+    ws["A1"] = "Comparison vs previous workbook"
+    ws["B1"] = os.path.basename(prev_path)
+    ws["A1"].font = Font(bold=True)
+
+    cols = [
+        "Ticker",
+        "PrevUpdatedAt",
+        "CurrUpdatedAt",
+        "PrevTotal",
+        "CurrTotal",
+        "DeltaTotal",
+        "PrevSignal",
+        "CurrSignal",
+        "SignalChanged",
+        "DeltaNews",
+        "DeltaTech",
+        "DeltaYahoo",
+        "DeltaLastWeekPct",
+        "DeltaLast1MPct",
+        "DeltaLast3MPct",
+    ]
+    ws.append(cols)
+    for c in range(1, len(cols) + 1):
+        ws.cell(2, c).font = Font(bold=True)
+        ws.cell(2, c).alignment = Alignment(horizontal="center")
+
+    def to_f(v):
+        try:
+            if v is None or v == "":
+                return None
+            return float(v)
+        except Exception:
+            return None
+
+    rows_out = []
+    for cur in curr_rows:
+        t = str(cur["Ticker"])
+        prev = prev_map.get(t)
+        if not prev:
+            continue
+
+        p_total = to_f(prev["TotalScore"])
+        c_total = to_f(cur["TotalScore"])
+        d_total = (c_total - p_total) if p_total is not None and c_total is not None else None
+
+        def delta(field):
+            pv = to_f(prev.get(field))
+            cv = to_f(cur.get(field))
+            if pv is None or cv is None:
+                return None
+            return cv - pv
+
+        rows_out.append({
+            "Ticker": t,
+            "PrevUpdatedAt": prev.get("UpdatedAt"),
+            "CurrUpdatedAt": cur.get("UpdatedAt"),
+            "PrevTotal": p_total,
+            "CurrTotal": c_total,
+            "DeltaTotal": d_total,
+            "PrevSignal": prev.get("Signal"),
+            "CurrSignal": cur.get("Signal"),
+            "SignalChanged": "YES" if prev.get("Signal") != cur.get("Signal") else "",
+            "DeltaNews": delta("NewsScore"),
+            "DeltaTech": delta("TechScore"),
+            "DeltaYahoo": delta("YahooScore"),
+            "DeltaLastWeekPct": delta("LastWeekMonFriChangePct"),
+            "DeltaLast1MPct": delta("Last1MChangePct"),
+            "DeltaLast3MPct": delta("Last3MChangePct"),
+        })
+
+    rows_out.sort(key=lambda x: abs(x["DeltaTotal"]) if x["DeltaTotal"] is not None else -1, reverse=True)
+
+    for rr in rows_out:
+        ws.append([rr.get(c) for c in cols])
+
+    green = PatternFill(fill_type="solid", fgColor="C6EFCE")
+    red = PatternFill(fill_type="solid", fgColor="FFC7CE")
+    yellow = PatternFill(fill_type="solid", fgColor="FFEB9C")
+
+    delta_cols = {
+        "DeltaTotal": cols.index("DeltaTotal") + 1,
+        "DeltaNews": cols.index("DeltaNews") + 1,
+        "DeltaTech": cols.index("DeltaTech") + 1,
+        "DeltaYahoo": cols.index("DeltaYahoo") + 1,
+        "DeltaLastWeekPct": cols.index("DeltaLastWeekPct") + 1,
+        "DeltaLast1MPct": cols.index("DeltaLast1MPct") + 1,
+        "DeltaLast3MPct": cols.index("DeltaLast3MPct") + 1,
+    }
+    changed_col = cols.index("SignalChanged") + 1
+
+    for r in range(3, ws.max_row + 1):
+        for _, c in delta_cols.items():
+            v = ws.cell(r, c).value
+            if isinstance(v, (int, float)):
+                if v > 0:
+                    ws.cell(r, c).fill = green
+                elif v < 0:
+                    ws.cell(r, c).fill = red
+
+        if ws.cell(r, changed_col).value == "YES":
+            ws.cell(r, changed_col).fill = yellow
+
+    ws.freeze_panes = "A3"
+
+
 def build_dashboard(wb: Workbook):
     # vytvoř / vyčisti sheet
     if "Dashboard" in wb.sheetnames:
@@ -1232,6 +1406,7 @@ def main():
     # ✅ ADDED: Build Dashboard
     # =========================
     build_dashboard(wb)
+    build_delta_vs_previous(wb, outdir, logger)
 
     ts = now_local_naive().strftime("%Y%m%d_%H%M%S")
     outname = f"market_checker_watchlist_{ts}.xlsx"
