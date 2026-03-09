@@ -520,6 +520,8 @@ def fetch_rss_items_for_ticker(
                 )
             break
         source_name = str(src.get("source") or "unknown")
+        if source_name not in RSS_ENABLED_SOURCES:
+            continue
         template = (src.get("template") or "").strip()
         if not template:
             continue
