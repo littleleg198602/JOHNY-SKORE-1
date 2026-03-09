@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import glob
+import json
 import datetime as dt
 import logging
 import math
@@ -34,6 +35,7 @@ import re
 import sys
 import time
 import urllib.request
+import urllib.parse
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -631,21 +633,19 @@ def fetch_rss_items_for_ticker(
 
 
 def fetch_yfinance_news_fallback(ticker: str, max_items: int = 12, logger: Optional[logging.Logger] = None) -> List[NewsItem]:
-    try:
-        import yfinance as yf
-    except Exception:
-        return []
-
+    w = source_weight(3)
     items: List[NewsItem] = []
-    try:
-        raw_news = getattr(yf.Ticker(ticker), "news", []) or []
-        w = source_weight(3)
-        taken = 0
+    seen_links = set()
+
+    def append_news(source_name: str, raw_news: List[Dict[str, Any]]):
+        nonlocal items
         for n in raw_news:
-            if taken >= max_items:
+            if len(items) >= max_items:
                 break
             title = str(n.get("title") or "")
             link = str(n.get("link") or "")
+            if link and link in seen_links:
+                continue
             pub = None
             ts = n.get("providerPublishTime")
             if ts is not None:
@@ -653,24 +653,44 @@ def fetch_yfinance_news_fallback(ticker: str, max_items: int = 12, logger: Optio
                     pub = dt.datetime.fromtimestamp(int(ts), tz=dt.timezone.utc)
                 except Exception:
                     pub = None
-
+            if link:
+                seen_links.add(link)
             items.append(
                 NewsItem(
                     ticker=ticker,
-                    source="Yahoo Finance API",
+                    source=source_name,
                     title=title,
                     link=link,
                     published_utc=pub,
                     weight=w,
                 )
             )
-            taken += 1
+
+    # 1) yfinance wrapper
+    try:
+        import yfinance as yf
+        raw_news = getattr(yf.Ticker(ticker), "news", []) or []
+        append_news("Yahoo Finance API", raw_news)
     except Exception as e:
         if logger:
-            logger.warning("Yahoo API fallback news failed for %s: %s", ticker, e)
-        return []
+            logger.warning("Yahoo yfinance news failed for %s: %s", ticker, e)
 
-    return items
+    # 2) Přímé Yahoo Search API (často vrátí více výsledků než yfinance.news)
+    try:
+        q = urllib.parse.quote(str(ticker))
+        url = f"https://query1.finance.yahoo.com/v1/finance/search?q={q}&quotesCount=1&newsCount={max_items}"
+        raw = fetch_url_bytes(url, timeout_s=RSS_FETCH_TIMEOUT_S)
+        obj = json.loads(raw.decode("utf-8", errors="ignore"))
+        api_news = obj.get("news") or []
+        append_news("Yahoo Search API", api_news)
+    except Exception as e:
+        if logger:
+            logger.warning("Yahoo search API fallback failed for %s: %s", ticker, e)
+
+    if logger and not items:
+        logger.info("Yahoo fallback returned 0 items for %s", ticker)
+
+    return items[:max_items]
 
 
 def news_metrics_48h(items: List[NewsItem], now_utc: dt.datetime) -> Tuple[float, int]:
