@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import datetime as dt
 import time
+import urllib.error
 import urllib.request
 from collections.abc import Callable
 
@@ -59,8 +60,6 @@ def fetch_rss_items_for_ticker(
 
     for src in sources:
         if time.time() - t0 >= RSS_TICKER_BUDGET_S:
-            if on_warning:
-                on_warning(f"RSS time budget reached for {ticker}; remaining sources skipped")
             break
 
         source_name = str(src.get("source") or "unknown")
@@ -68,18 +67,27 @@ def fetch_rss_items_for_ticker(
         if not template:
             continue
 
-        state = (source_health or {}).setdefault(source_name, {"failures": 0, "disabled": False}) if source_health is not None else None
+        if source_health is not None:
+            state = source_health.setdefault(source_name, {"failures": 0, "disabled": False, "warned_keys": set()})
+        else:
+            state = None
+
         if state and state["disabled"]:
             continue
 
-        urls = [template.format(ticker=c) for c in ticker_candidates(ticker)] if "{ticker}" in template else [template]
+        has_ticker = "{ticker}" in template
+        urls = [template.format(ticker=c) for c in ticker_candidates(ticker)] if has_ticker else [template]
         seen_links: set[str] = set()
 
         for url in urls:
             feed = None
-            cache_key = f"{source_name}|{url}" if shared_feed_cache is not None and "{ticker}" not in template else None
-            if cache_key:
-                feed = shared_feed_cache.get(cache_key)
+            cache_key = f"{source_name}|{url}" if shared_feed_cache is not None and not has_ticker else None
+
+            if cache_key and cache_key in shared_feed_cache:
+                cached = shared_feed_cache[cache_key]
+                if isinstance(cached, dict) and cached.get("error"):
+                    continue
+                feed = cached
 
             if feed is None:
                 try:
@@ -87,14 +95,31 @@ def fetch_rss_items_for_ticker(
                     if cache_key:
                         shared_feed_cache[cache_key] = feed
                 except Exception as exc:
-                    if on_warning:
-                        on_warning(f"RSS fetch failed ({source_name}, {ticker}): {exc}")
+                    err_key = f"{source_name}:{type(exc).__name__}:{str(exc)[:120]}"
                     if state:
                         state["failures"] += 1
-                        if source_name not in RSS_NEVER_DISABLE_SOURCES and state["failures"] >= RSS_DISABLE_AFTER_CONSECUTIVE_FAILURES:
-                            state["disabled"] = True
-                            if on_warning:
-                                on_warning(f"RSS source disabled for this run after repeated failures: {source_name}")
+
+                    if isinstance(exc, urllib.error.HTTPError) and exc.code == 404 and not has_ticker and state:
+                        state["disabled"] = True
+                        if cache_key:
+                            shared_feed_cache[cache_key] = {"error": "404"}
+                        if on_warning and "404_disabled" not in state["warned_keys"]:
+                            on_warning(f"RSS source disabled (404 permanent): {source_name}")
+                            state["warned_keys"].add("404_disabled")
+                        continue
+
+                    if cache_key:
+                        shared_feed_cache[cache_key] = {"error": str(exc)}
+
+                    if on_warning and state and err_key not in state["warned_keys"]:
+                        on_warning(f"RSS fetch failed ({source_name}): {exc}")
+                        state["warned_keys"].add(err_key)
+
+                    if state and source_name not in RSS_NEVER_DISABLE_SOURCES and state["failures"] >= RSS_DISABLE_AFTER_CONSECUTIVE_FAILURES:
+                        state["disabled"] = True
+                        if on_warning and "disabled_retries" not in state["warned_keys"]:
+                            on_warning(f"RSS source disabled after repeated failures: {source_name}")
+                            state["warned_keys"].add("disabled_retries")
                     continue
 
             w = source_weight(int(src.get("info_level") or 3))
@@ -102,7 +127,7 @@ def fetch_rss_items_for_ticker(
             for entry in getattr(feed, "entries", []) or []:
                 if taken >= max_per_source:
                     break
-                if "{ticker}" not in template and not _entry_mentions_ticker(entry, ticker):
+                if not has_ticker and not _entry_mentions_ticker(entry, ticker):
                     continue
 
                 link = str(getattr(entry, "link", "") or "")

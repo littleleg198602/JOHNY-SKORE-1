@@ -32,15 +32,21 @@ def run_analysis(
     warning_callback: WarningCallback | None = None,
 ) -> RunResult:
     warnings: list[str] = []
+    warning_counts: dict[str, int] = {}
 
-    def warn(message: str) -> None:
-        warnings.append(message)
-        logger.warning(message)
-        if warning_callback:
-            warning_callback(message)
+    def warn(message: str, dedupe_key: str | None = None) -> None:
+        key = dedupe_key or message
+        warning_counts[key] = warning_counts.get(key, 0) + 1
+
+        is_first = warning_counts[key] == 1
+        if is_first:
+            warnings.append(message)
+            logger.warning(message)
+            if warning_callback:
+                warning_callback(message)
 
     mt5 = MT5Client()
-    yahoo = YahooClient(on_warning=warn)
+    yahoo = YahooClient(on_warning=lambda m: warn(m, dedupe_key=m))
     cap_map = load_marketcap_map(marketcap_path)
     source_health: dict = {}
     feed_cache: dict = {}
@@ -54,9 +60,11 @@ def run_analysis(
         mt5.connect()
         mt5_connected = True
     except Exception as exc:
-        warn(f"MT5 unavailable, using yfinance fallback for tech: {exc}")
+        warn(f"MT5 unavailable, using yfinance fallback for tech: {exc}", dedupe_key="mt5_unavailable")
 
     total_symbols = len(symbols)
+    no_news_count = 0
+
     for idx, ticker in enumerate(symbols, start=1):
         if progress_callback:
             progress_callback(idx - 1, total_symbols, ticker)
@@ -68,12 +76,12 @@ def run_analysis(
             max_rss_items_per_source,
             source_health=source_health,
             shared_feed_cache=feed_cache,
-            on_warning=warn,
+            on_warning=lambda m: warn(m, dedupe_key=m),
         )
 
         articles = yf_news + [a for a in rss_news if a.link not in {n.link for n in yf_news if n.link}]
         if not articles:
-            warn(f"No news found for {ticker} (Yahoo + RSS)")
+            no_news_count += 1
         all_articles.extend(articles)
 
         n_w, n_v = news_metrics_48h(articles, now_utc)
@@ -87,14 +95,17 @@ def run_analysis(
                 ma20, ma50, rsi14 = sma(closes, 20), sma(closes, 50), rsi(closes, 14)
                 tech = TechSnapshot(score=tech_score(c, ma20, ma50, rsi14), status="ok_mt", close=c, ma20=ma20, ma50=ma50, rsi14=rsi14)
             else:
-                warn(f"MT5 has insufficient D1 history for {ticker}; using yfinance tech fallback")
+                warn(
+                    f"MT5 has insufficient D1 history for {ticker}; using yfinance tech fallback",
+                    dedupe_key="mt5_insufficient_history",
+                )
 
         if tech.status != "ok_mt":
             tech = yahoo.tech_snapshot(ticker)
 
         ysnap = yahoo.yahoo_snapshot(ticker)
         if ysnap.status != "ok_yf":
-            warn(f"Yahoo snapshot missing for {ticker}")
+            warn(f"Yahoo snapshot missing for {ticker}", dedupe_key="yahoo_snapshot_missing")
 
         if mt5_connected:
             lw, lws = last_week_change_pct(mt5, yahoo, ticker)
@@ -129,6 +140,18 @@ def run_analysis(
 
         if progress_callback:
             progress_callback(idx, total_symbols, ticker)
+
+    if no_news_count > 0:
+        msg = f"No news found for {no_news_count}/{total_symbols} tickers (Yahoo + RSS)."
+        warnings.append(msg)
+        logger.warning(msg)
+        if warning_callback:
+            warning_callback(msg)
+
+    for key, count in warning_counts.items():
+        if count > 1:
+            summary = f"Warning repeated {count}×: {key}"
+            warnings.append(summary)
 
     if mt5_connected:
         mt5.close()
