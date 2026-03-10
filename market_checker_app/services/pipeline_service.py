@@ -146,6 +146,9 @@ def run_analysis(
         perf = PerformanceSnapshot(lw, lws, m1, m1s, m3, m3s)
         total = total_score(n_score, tech.score, ysnap.score)
         cap, rank = cap_map.get(ticker, (None, None))
+        if cap is None:
+            overview = yahoo.quote_overview(ticker)
+            cap = overview.get("market_cap")
 
         rows.append(
             SignalRow(
