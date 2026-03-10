@@ -8,7 +8,7 @@ import pandas as pd
 
 from market_checker_app.analysis.indicators import rsi, sma
 from market_checker_app.analysis.performance import last_1m_change_pct, last_3m_change_pct, last_week_change_pct
-from market_checker_app.analysis.scoring import news_metrics_48h, news_score_0_50, signal, tech_score, total_score
+from market_checker_app.analysis.scoring import news_metrics_48h_with_latest_fallback, news_score_0_50, signal, tech_score, total_score
 from market_checker_app.collectors.marketcap_loader import load_marketcap_map
 from market_checker_app.collectors.mt5_client import MT5Client
 from market_checker_app.collectors.rss_client import fetch_rss_items_for_ticker
@@ -88,6 +88,7 @@ def run_analysis(
     total_symbols = len(symbols)
     no_news_count = 0
     stale_fallback_count = 0
+    news48h_fallback_count = 0
 
     for idx, ticker in enumerate(symbols, start=1):
         if progress_callback:
@@ -111,7 +112,9 @@ def run_analysis(
             no_news_count += 1
         all_articles.extend(articles)
 
-        n_w, n_v = news_metrics_48h(articles, now_utc)
+        n_w, n_v, used_news48h_fallback = news_metrics_48h_with_latest_fallback(articles, now_utc)
+        if used_news48h_fallback:
+            news48h_fallback_count += 1
         n_score = news_score_0_50(n_w, n_v)
 
         tech = TechSnapshot(score=0.0, status="missing")
@@ -180,6 +183,13 @@ def run_analysis(
 
     if no_news_count > 0:
         msg = f"No news found for {no_news_count}/{total_symbols} tickers (Yahoo + RSS)."
+        warnings.append(msg)
+        logger.warning(msg)
+        if warning_callback:
+            warning_callback(msg)
+
+    if news48h_fallback_count > 0:
+        msg = f"Used latest-news fallback for {news48h_fallback_count}/{total_symbols} tickers (no items in last 48h)."
         warnings.append(msg)
         logger.warning(msg)
         if warning_callback:
