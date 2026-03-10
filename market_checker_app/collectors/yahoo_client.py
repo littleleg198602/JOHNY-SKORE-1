@@ -26,6 +26,39 @@ class YahooClient:
         with urllib.request.urlopen(req, timeout=self.timeout_s) as resp:
             return resp.read()
 
+    def quote_overview(self, symbol: str) -> dict[str, Any]:
+        import yfinance as yf
+
+        out: dict[str, Any] = {
+            "market_cap": None,
+            "long_name": None,
+            "short_name": None,
+        }
+
+        try:
+            t = yf.Ticker(symbol)
+            info = getattr(t, "info", {}) or {}
+
+            market_cap = info.get("marketCap")
+            if market_cap is None:
+                fast_info = getattr(t, "fast_info", None)
+                market_cap = getattr(fast_info, "market_cap", None) if fast_info is not None else None
+            if market_cap is not None:
+                out["market_cap"] = float(market_cap)
+
+            long_name = info.get("longName")
+            if long_name:
+                out["long_name"] = str(long_name)
+
+            short_name = info.get("shortName")
+            if short_name:
+                out["short_name"] = str(short_name)
+
+            return out
+        except Exception as exc:
+            self._warn(f"Yahoo quote overview failed for {symbol}: {exc}")
+            return out
+
     def history_closes(self, symbol: str, period: str = "12mo") -> list[float]:
         import yfinance as yf
 
@@ -119,12 +152,30 @@ class YahooClient:
         except Exception as exc:
             self._warn(f"yfinance news failed for {ticker}: {exc}")
 
-        try:
-            q = urllib.parse.quote(ticker)
+        def fetch_search_news(query: str) -> None:
+            q = urllib.parse.quote(query)
             url = f"https://query1.finance.yahoo.com/v1/finance/search?q={q}&quotesCount=1&newsCount={max_items}"
             obj = json.loads(self._fetch_url_bytes(url).decode("utf-8", errors="ignore"))
             parse(obj.get("news") or [], "Yahoo Search API")
+
+        try:
+            fetch_search_news(ticker)
         except Exception as exc:
             self._warn(f"Yahoo Search API fallback failed for {ticker}: {exc}")
+
+        # Kratke tickery (napr. "AA") vraci casto 0 news pri hledani jen podle symbolu.
+        # Pokud stale nic nemame, zkusime vyhledat i podle nazvu firmy z quote endpointu.
+        if not items:
+            overview = self.quote_overview(ticker)
+            for name_key in ("long_name", "short_name"):
+                query = overview.get(name_key)
+                if not query:
+                    continue
+                try:
+                    fetch_search_news(str(query))
+                except Exception as exc:
+                    self._warn(f"Yahoo Search API name fallback failed for {ticker} ({name_key}): {exc}")
+                if items:
+                    break
 
         return items[:max_items]
