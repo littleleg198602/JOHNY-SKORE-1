@@ -53,6 +53,23 @@ def news_metrics_48h(items: list[NewsItem], now_utc: dt.datetime) -> tuple[float
     return wsum, cnt
 
 
+def news_metrics_48h_with_latest_fallback(items: list[NewsItem], now_utc: dt.datetime) -> tuple[float, int, bool]:
+    wsum, cnt = news_metrics_48h(items, now_utc)
+    if cnt > 0:
+        return wsum, cnt, False
+
+    # Pokud neni zadna zprava v poslednich 48h, zohledni alespon nejnovejsi dostupnou.
+    dated_items = [it for it in items if it.published_utc is not None]
+    if not dated_items:
+        return wsum, cnt, False
+
+    latest = max(dated_items, key=lambda it: it.published_utc)
+    age_h = max(0.0, (now_utc - latest.published_utc).total_seconds() / 3600.0)
+    # Pro starsi zpravy zachovame nizkou, ale nenulovou vahu.
+    recency = max(0.05, 1.0 / (1.0 + age_h / (24.0 * 7.0)))
+    return latest.weight * recency, 1, True
+
+
 def news_score_0_50(news_weighted_48h: float, news_volume_48h: int) -> float:
     return max(0.0, min(50.0, min(30.0, news_weighted_48h * 4.0) + min(20.0, math.log1p(news_volume_48h) * 5.0)))
 
