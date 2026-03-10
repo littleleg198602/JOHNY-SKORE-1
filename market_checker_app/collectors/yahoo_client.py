@@ -84,6 +84,33 @@ class YahooClient:
                 out.append((d, float(o), float(c)))
         return out
 
+    def price_change_pct_since(self, symbol: str, since_date: dt.date) -> float | None:
+        import yfinance as yf
+
+        try:
+            hist = yf.Ticker(symbol).history(period="1y", interval="1d")
+            if hist is None or hist.empty:
+                return None
+
+            baseline = None
+            latest_close = None
+            for idx, row in hist.iterrows():
+                d = idx.date()
+                c = row.get("Close")
+                if c is None:
+                    continue
+                c = float(c)
+                latest_close = c
+                if baseline is None and d >= since_date:
+                    baseline = c
+
+            if baseline is None or latest_close is None or baseline <= 0:
+                return None
+            return (latest_close / baseline - 1.0) * 100.0
+        except Exception as exc:
+            self._warn(f"price change lookup failed for {symbol}: {exc}")
+            return None
+
     def tech_snapshot(self, symbol: str) -> TechSnapshot:
         try:
             closes = self.history_closes(symbol)

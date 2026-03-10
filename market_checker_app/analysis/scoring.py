@@ -67,7 +67,9 @@ def news_metrics_48h_with_latest_fallback(items: list[NewsItem], now_utc: dt.dat
     age_h = max(0.0, (now_utc - latest.published_utc).total_seconds() / 3600.0)
     # Pro starsi zpravy zachovame nizkou, ale nenulovou vahu.
     recency = max(0.05, 1.0 / (1.0 + age_h / (24.0 * 7.0)))
-    return latest.weight * recency, 1, True
+    # Zachovame semantiku metrik "48h": volume48h zustane 0,
+    # ale score dostane maly impuls z posledni dostupne zpravy.
+    return latest.weight * recency, 0, True
 
 
 def news_score_0_50(news_weighted_48h: float, news_volume_48h: int) -> float:

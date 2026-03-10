@@ -115,6 +115,13 @@ def run_analysis(
         n_w, n_v, used_news48h_fallback = news_metrics_48h_with_latest_fallback(articles, now_utc)
         if used_news48h_fallback:
             news48h_fallback_count += 1
+            latest_dt = max((a.published_utc for a in articles if a.published_utc is not None), default=None)
+            if latest_dt is not None:
+                pct_since_news = yahoo.price_change_pct_since(ticker, latest_dt.date())
+                if pct_since_news is not None and pct_since_news >= 30.0:
+                    # Pokud od posledni zpravy cena uz vyrostla >=30 %, fallback efekt tlumime.
+                    # Nechceme ignorovat uplne, ale omezit riziko "pozdniho naskoku".
+                    n_w *= 0.2
         n_score = news_score_0_50(n_w, n_v)
 
         tech = TechSnapshot(score=0.0, status="missing")
@@ -202,6 +209,16 @@ def run_analysis(
 
     if mt5_connected:
         mt5.close()
+
+    # Doplneni ranku podle market cap, pokud chybi v externim souboru.
+    ranked = sorted(
+        [(i, r.market_cap_usd) for i, r in enumerate(rows) if r.market_cap_usd is not None],
+        key=lambda x: x[1],
+        reverse=True,
+    )
+    for rank_idx, (row_idx, _) in enumerate(ranked, start=1):
+        if rows[row_idx].rank_market_cap is None:
+            rows[row_idx].rank_market_cap = rank_idx
 
     return RunResult(signals=rows, articles=all_articles, sources=SOURCES, warnings=warnings)
 
