@@ -8,7 +8,7 @@ import pandas as pd
 
 from market_checker_app.analysis.indicators import rsi, sma
 from market_checker_app.analysis.performance import last_1m_change_pct, last_3m_change_pct, last_week_change_pct
-from market_checker_app.analysis.scoring import news_metrics_48h, news_score_0_50, signal, tech_score, total_score
+from market_checker_app.analysis.scoring import news_metrics_48h_with_latest_fallback, news_score_0_50, signal, tech_score, total_score
 from market_checker_app.collectors.marketcap_loader import load_marketcap_map
 from market_checker_app.collectors.mt5_client import MT5Client
 from market_checker_app.collectors.rss_client import fetch_rss_items_for_ticker
@@ -88,6 +88,7 @@ def run_analysis(
     total_symbols = len(symbols)
     no_news_count = 0
     stale_fallback_count = 0
+    news48h_fallback_count = 0
 
     for idx, ticker in enumerate(symbols, start=1):
         if progress_callback:
@@ -111,7 +112,16 @@ def run_analysis(
             no_news_count += 1
         all_articles.extend(articles)
 
-        n_w, n_v = news_metrics_48h(articles, now_utc)
+        n_w, n_v, used_news48h_fallback = news_metrics_48h_with_latest_fallback(articles, now_utc)
+        if used_news48h_fallback:
+            news48h_fallback_count += 1
+            latest_dt = max((a.published_utc for a in articles if a.published_utc is not None), default=None)
+            if latest_dt is not None:
+                pct_since_news = yahoo.price_change_pct_since(ticker, latest_dt.date())
+                if pct_since_news is not None and pct_since_news >= 30.0:
+                    # Pokud od posledni zpravy cena uz vyrostla >=30 %, fallback efekt tlumime.
+                    # Nechceme ignorovat uplne, ale omezit riziko "pozdniho naskoku".
+                    n_w *= 0.2
         n_score = news_score_0_50(n_w, n_v)
 
         tech = TechSnapshot(score=0.0, status="missing")
@@ -146,6 +156,9 @@ def run_analysis(
         perf = PerformanceSnapshot(lw, lws, m1, m1s, m3, m3s)
         total = total_score(n_score, tech.score, ysnap.score)
         cap, rank = cap_map.get(ticker, (None, None))
+        if cap is None:
+            overview = yahoo.quote_overview(ticker)
+            cap = overview.get("market_cap")
 
         rows.append(
             SignalRow(
@@ -182,6 +195,13 @@ def run_analysis(
         if warning_callback:
             warning_callback(msg)
 
+    if news48h_fallback_count > 0:
+        msg = f"Used latest-news fallback for {news48h_fallback_count}/{total_symbols} tickers (no items in last 48h)."
+        warnings.append(msg)
+        logger.warning(msg)
+        if warning_callback:
+            warning_callback(msg)
+
     for key, count in warning_counts.items():
         if count > 1:
             summary = f"Warning repeated {count}×: {key}"
@@ -189,6 +209,16 @@ def run_analysis(
 
     if mt5_connected:
         mt5.close()
+
+    # Doplneni ranku podle market cap, pokud chybi v externim souboru.
+    ranked = sorted(
+        [(i, r.market_cap_usd) for i, r in enumerate(rows) if r.market_cap_usd is not None],
+        key=lambda x: x[1],
+        reverse=True,
+    )
+    for rank_idx, (row_idx, _) in enumerate(ranked, start=1):
+        if rows[row_idx].rank_market_cap is None:
+            rows[row_idx].rank_market_cap = rank_idx
 
     return RunResult(signals=rows, articles=all_articles, sources=SOURCES, warnings=warnings)
 
