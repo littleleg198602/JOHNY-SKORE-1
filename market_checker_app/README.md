@@ -4,6 +4,7 @@ Interní modulární analytická aplikace postavená nad původním skriptem `re
 
 ## Co umí
 - načtení watchlistu z MT5 (MarketWatch visible symbols)
+- načtení watchlistu z Excelu `.xlsx` (pouze sloupec `Yahoo ticker` / sloupec D)
 - scoring: News + Tech + Yahoo + Total + Signal
 - fallback Tech: MT5 -> yfinance
 - Yahoo detail scoring (price/target/reco)
