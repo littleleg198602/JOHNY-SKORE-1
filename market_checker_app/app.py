@@ -71,7 +71,7 @@ with st.sidebar:
     uploaded_watchlist = st.file_uploader(
         "Nahrát watchlist (.xlsx)",
         type=["xlsx"],
-        help="Nahraj Excel s tickery. Použije se sloupec 'Ticker' nebo první sloupec.",
+        help="Nahraj Excel s tickery. Použije se pouze sloupec 'Yahoo ticker' (sloupec D).",
     )
     if uploaded_watchlist is not None:
         try:
@@ -79,21 +79,25 @@ with st.sidebar:
             if uploaded_df.empty:
                 st.warning("Nahraný Excel je prázdný.")
             else:
-                ticker_col = next((c for c in uploaded_df.columns if str(c).strip().lower() == "ticker"), uploaded_df.columns[0])
-                tickers = (
-                    uploaded_df[ticker_col]
-                    .dropna()
-                    .astype(str)
-                    .str.strip()
-                    .loc[lambda s: s != ""]
-                    .drop_duplicates()
-                    .tolist()
-                )
-                if tickers:
-                    st.session_state.watchlist = tickers
-                    st.success(f"Načteno {len(tickers)} symbolů z Excelu ({uploaded_watchlist.name}).")
-                else:
-                    st.warning("V Excelu nebyly nalezeny žádné tickery.")
+                ticker_col = next((c for c in uploaded_df.columns if str(c).strip().lower() == "yahoo ticker"), None)
+                if ticker_col is None:
+                    st.warning("V Excelu chybí sloupec 'Yahoo ticker' (sloupec D).")
+                    ticker_col = None
+                if ticker_col is not None:
+                    tickers = (
+                        uploaded_df[ticker_col]
+                        .dropna()
+                        .astype(str)
+                        .str.strip()
+                        .loc[lambda s: s != ""]
+                        .drop_duplicates()
+                        .tolist()
+                    )
+                    if tickers:
+                        st.session_state.watchlist = tickers
+                        st.success(f"Načteno {len(tickers)} Yahoo tickerů z Excelu ({uploaded_watchlist.name}).")
+                    else:
+                        st.warning("Ve sloupci 'Yahoo ticker' nebyly nalezeny žádné tickery.")
         except Exception as exc:
             st.error(f"Nepodařilo se načíst Excel soubor: {exc}")
 
