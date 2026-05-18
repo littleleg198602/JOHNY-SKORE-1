@@ -68,6 +68,35 @@ with st.sidebar:
 
     st.caption(f"Watchlist size: {len(st.session_state.watchlist)}")
 
+    uploaded_watchlist = st.file_uploader(
+        "Nahrát watchlist (.xlsx)",
+        type=["xlsx"],
+        help="Nahraj Excel s tickery. Použije se sloupec 'Ticker' nebo první sloupec.",
+    )
+    if uploaded_watchlist is not None:
+        try:
+            uploaded_df = pd.read_excel(uploaded_watchlist)
+            if uploaded_df.empty:
+                st.warning("Nahraný Excel je prázdný.")
+            else:
+                ticker_col = next((c for c in uploaded_df.columns if str(c).strip().lower() == "ticker"), uploaded_df.columns[0])
+                tickers = (
+                    uploaded_df[ticker_col]
+                    .dropna()
+                    .astype(str)
+                    .str.strip()
+                    .loc[lambda s: s != ""]
+                    .drop_duplicates()
+                    .tolist()
+                )
+                if tickers:
+                    st.session_state.watchlist = tickers
+                    st.success(f"Načteno {len(tickers)} symbolů z Excelu ({uploaded_watchlist.name}).")
+                else:
+                    st.warning("V Excelu nebyly nalezeny žádné tickery.")
+        except Exception as exc:
+            st.error(f"Nepodařilo se načíst Excel soubor: {exc}")
+
     if st.button("Spustit analýzu"):
         if not st.session_state.watchlist:
             st.warning("Nejdřív načti watchlist z MT5.")
