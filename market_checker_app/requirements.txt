@@ -1,6 +1,0 @@
-streamlit
-pandas
-openpyxl
-yfinance
-feedparser
-MetaTrader5; platform_system == "Windows"
