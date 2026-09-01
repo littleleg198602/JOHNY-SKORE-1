@@ -26,6 +26,9 @@ The model must output both:
   and stores the daily price panel in SQLite without filling missing sessions.
 - `market_checker_app/model_v3/import_prices.py` provides a repeatable CLI
   importer for ticker lists from TXT, CSV/TSV and Excel files.
+- `market_checker_app/model_v3/universe.py` stores dated universe snapshots
+  with explicit benchmark and sector mappings and selects the latest snapshot
+  available at a prediction date.
 - `market_checker_app/model_v3/labels.py` builds fixed-horizon forward stock,
   benchmark and excess-return labels.
 - `market_checker_app/model_v3/walk_forward.py` creates chronological
@@ -39,7 +42,9 @@ The model must output both:
 1. Add a persistent historical daily-price panel with adjusted prices,
    corporate actions and source timestamps. The prototype storage and Yahoo
    importer are now in place; the point-in-time data-source audit remains.
-2. Add point-in-time universe membership and benchmark/sector mappings.
+2. Add point-in-time universe membership and benchmark/sector mappings. The
+   snapshot store is now in place; historical membership still depends on
+   importing dated source snapshots rather than assuming today's universe.
 3. Build a baseline model: momentum-only, then Elastic Net and gradient
    boosted trees.
 4. Add cost-aware portfolio construction and risk/exposure constraints.

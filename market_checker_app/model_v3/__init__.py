@@ -14,6 +14,11 @@ from .price_panel import (
     normalize_price_frame,
 )
 from .price_features import build_price_features, cross_sectional_rank
+from .universe import (
+    SQLiteUniverseStore,
+    normalize_universe_snapshot,
+    read_universe_snapshot,
+)
 from .walk_forward import WalkForwardWindow, make_walk_forward_windows, select_window
 
 __all__ = [
@@ -28,4 +33,7 @@ __all__ = [
     "select_window",
     "SQLitePricePanelStore",
     "YahooHistoricalLoader",
+    "SQLiteUniverseStore",
+    "normalize_universe_snapshot",
+    "read_universe_snapshot",
 ]
