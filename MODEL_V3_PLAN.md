@@ -31,6 +31,8 @@ The model must output both:
   available at a prediction date.
 - `market_checker_app/model_v3/baseline.py` provides a momentum benchmark and
   a train-only Elastic Net/logistic baseline with walk-forward test predictions.
+- `market_checker_app/model_v3/dataset.py` joins point-in-time membership,
+  benchmark prices, lagged features and forward labels into one model panel.
 - `market_checker_app/model_v3/labels.py` builds fixed-horizon forward stock,
   benchmark and excess-return labels.
 - `market_checker_app/model_v3/walk_forward.py` creates chronological
@@ -45,8 +47,9 @@ The model must output both:
    corporate actions and source timestamps. The prototype storage and Yahoo
    importer are now in place; the point-in-time data-source audit remains.
 2. Add point-in-time universe membership and benchmark/sector mappings. The
-   snapshot store is now in place; historical membership still depends on
-   importing dated source snapshots rather than assuming today's universe.
+   snapshot store and model-panel join are now in place; historical membership
+   still depends on importing dated source snapshots rather than assuming
+   today's universe.
 3. Build a baseline model: momentum-only and Elastic Net are now available;
    gradient boosted trees and probability calibration remain next.
 4. Add cost-aware portfolio construction and risk/exposure constraints.

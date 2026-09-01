@@ -12,6 +12,11 @@ from .baseline import (
     add_momentum_baseline,
     run_walk_forward_baseline,
 )
+from .dataset import (
+    attach_benchmark_prices,
+    attach_point_in_time_universe,
+    build_model_panel,
+)
 from .labels import build_forward_labels
 from .price_panel import (
     SQLitePricePanelStore,
@@ -32,6 +37,8 @@ __all__ = [
     "BaselineConfig",
     "ElasticNetBaseline",
     "add_momentum_baseline",
+    "attach_benchmark_prices",
+    "attach_point_in_time_universe",
     "build_forward_labels",
     "build_price_features",
     "cross_sectional_rank",
@@ -41,6 +48,7 @@ __all__ = [
     "normalize_price_frame",
     "select_window",
     "run_walk_forward_baseline",
+    "build_model_panel",
     "SQLitePricePanelStore",
     "YahooHistoricalLoader",
     "SQLiteUniverseStore",
