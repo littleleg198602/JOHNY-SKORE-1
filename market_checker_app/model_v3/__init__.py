@@ -6,6 +6,12 @@ provide deterministic evaluation primitives before a trained model is added.
 """
 
 from .backtest import evaluate_cross_section
+from .baseline import (
+    BaselineConfig,
+    ElasticNetBaseline,
+    add_momentum_baseline,
+    run_walk_forward_baseline,
+)
 from .labels import build_forward_labels
 from .price_panel import (
     SQLitePricePanelStore,
@@ -23,6 +29,9 @@ from .walk_forward import WalkForwardWindow, make_walk_forward_windows, select_w
 
 __all__ = [
     "WalkForwardWindow",
+    "BaselineConfig",
+    "ElasticNetBaseline",
+    "add_momentum_baseline",
     "build_forward_labels",
     "build_price_features",
     "cross_sectional_rank",
@@ -31,6 +40,7 @@ __all__ = [
     "make_walk_forward_windows",
     "normalize_price_frame",
     "select_window",
+    "run_walk_forward_baseline",
     "SQLitePricePanelStore",
     "YahooHistoricalLoader",
     "SQLiteUniverseStore",

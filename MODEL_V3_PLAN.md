@@ -29,6 +29,8 @@ The model must output both:
 - `market_checker_app/model_v3/universe.py` stores dated universe snapshots
   with explicit benchmark and sector mappings and selects the latest snapshot
   available at a prediction date.
+- `market_checker_app/model_v3/baseline.py` provides a momentum benchmark and
+  a train-only Elastic Net/logistic baseline with walk-forward test predictions.
 - `market_checker_app/model_v3/labels.py` builds fixed-horizon forward stock,
   benchmark and excess-return labels.
 - `market_checker_app/model_v3/walk_forward.py` creates chronological
@@ -45,8 +47,8 @@ The model must output both:
 2. Add point-in-time universe membership and benchmark/sector mappings. The
    snapshot store is now in place; historical membership still depends on
    importing dated source snapshots rather than assuming today's universe.
-3. Build a baseline model: momentum-only, then Elastic Net and gradient
-   boosted trees.
+3. Build a baseline model: momentum-only and Elastic Net are now available;
+   gradient boosted trees and probability calibration remain next.
 4. Add cost-aware portfolio construction and risk/exposure constraints.
 5. Add point-in-time SEC fundamentals and earnings-event features.
 6. Add historical news storage, entity resolution and financial NLP.
