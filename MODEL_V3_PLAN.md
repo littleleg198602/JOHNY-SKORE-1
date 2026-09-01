@@ -22,6 +22,8 @@ The model must output both:
 
 - `market_checker_app/model_v3/price_features.py` builds lagged price,
   momentum, volatility, drawdown, liquidity and same-date percentile features.
+- `market_checker_app/model_v3/price_panel.py` normalizes provider responses
+  and stores the daily price panel in SQLite without filling missing sessions.
 - `market_checker_app/model_v3/labels.py` builds fixed-horizon forward stock,
   benchmark and excess-return labels.
 - `market_checker_app/model_v3/walk_forward.py` creates chronological
