@@ -20,6 +20,8 @@ The model must output both:
 
 ## Current branch contents
 
+- `Spustit_Model_V3_Import.bat` spouští celý import ve Windows dvojklikem bez
+  ručního zadávání příkazů.
 - `market_checker_app/model_v3/price_features.py` builds lagged price,
   momentum, volatility, drawdown, liquidity and same-date percentile features.
 - `market_checker_app/model_v3/price_panel.py` normalizes provider responses
