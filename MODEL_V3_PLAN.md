@@ -25,7 +25,8 @@ The model must output both:
 - `market_checker_app/model_v3/price_panel.py` normalizes provider responses
   and stores the daily price panel in SQLite without filling missing sessions.
 - `market_checker_app/model_v3/import_prices.py` provides a repeatable CLI
-  importer for ticker lists from TXT, CSV/TSV and Excel files.
+  importer for ticker lists from TXT, CSV/TSV, Excel files or the complete
+  visible MT5 watchlist; it can also persist a dated universe snapshot.
 - `market_checker_app/model_v3/universe.py` stores dated universe snapshots
   with explicit benchmark and sector mappings and selects the latest snapshot
   available at a prediction date.

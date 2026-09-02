@@ -8,6 +8,7 @@ from typing import Iterable
 import pandas as pd
 
 from .price_panel import SQLitePricePanelStore, YahooHistoricalLoader, ingest_tickers
+from .universe import SQLiteUniverseStore, normalize_universe_snapshot
 
 
 TICKER_COLUMN_NAMES = {
@@ -50,7 +51,7 @@ def read_tickers(path: Path) -> list[str]:
         for line in path.read_text(encoding="utf-8-sig").splitlines():
             line = line.split("#", 1)[0].strip()
             if line:
-                values.extend(part for part in re.split(r"[,;\\s]+", line) if part)
+                values.extend(part for part in re.split(r"[,;\s]+", line) if part)
         return normalize_tickers(values)
 
     if suffix in {".xlsx", ".xls"}:
@@ -96,6 +97,36 @@ def import_yahoo_prices(
     }
 
 
+def load_mt5_watchlist() -> list[str]:
+    """Read the complete visible MT5 symbol list without hard-coding a subset."""
+
+    from market_checker_app.collectors.mt5_client import MT5Client
+
+    tickers, error = MT5Client().load_watchlist()
+    if error:
+        raise RuntimeError(error)
+    return normalize_tickers(tickers)
+
+
+def persist_universe_snapshot(
+    tickers: Iterable[str],
+    *,
+    db_path: Path | str,
+    as_of_date: str,
+    source: str,
+    benchmark: str = "SPY",
+) -> int:
+    """Persist one complete, explicitly dated universe snapshot."""
+
+    snapshot = normalize_universe_snapshot(
+        pd.DataFrame({"ticker": normalize_tickers(tickers)}),
+        as_of_date=as_of_date,
+        source=source,
+        default_benchmark=benchmark,
+    )
+    return SQLiteUniverseStore(db_path).upsert(snapshot)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Importuj historická denní data do model v3 SQLite panelu."
@@ -103,6 +134,11 @@ def build_parser() -> argparse.ArgumentParser:
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument("--ticker", action="append", help="Ticker; lze zadat vícekrát.")
     source.add_argument("--tickers-file", type=Path, help="TXT, CSV, TSV nebo XLSX se seznamem tickerů.")
+    source.add_argument(
+        "--mt5-watchlist",
+        action="store_true",
+        help="Načte kompletní viditelné symboly z MT5 (bez zúžení na pilotní seznam).",
+    )
     parser.add_argument(
         "--db",
         type=Path,
@@ -114,15 +150,51 @@ def build_parser() -> argparse.ArgumentParser:
         default="max",
         help="Yahoo period, např. max, 10y nebo 2y (výchozí: max).",
     )
+    parser.add_argument(
+        "--benchmark",
+        default="SPY",
+        help="Benchmark ticker přidaný do importu a snapshotu (výchozí: SPY).",
+    )
+    parser.add_argument(
+        "--snapshot-date",
+        help="Datum snapshotu univerza ve formátu YYYY-MM-DD; bez něj se snapshot nevytvoří.",
+    )
+    parser.add_argument(
+        "--universe-db",
+        type=Path,
+        help="SQLite databáze pro membership snapshot; výchozí je --db.",
+    )
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    tickers = args.ticker if args.ticker else read_tickers(args.tickers_file)
+    if args.mt5_watchlist:
+        tickers = load_mt5_watchlist()
+    else:
+        tickers = args.ticker if args.ticker else read_tickers(args.tickers_file)
     if not tickers:
         print("Nebyl nalezen žádný ticker.")
         return 2
+
+    benchmark = str(args.benchmark).strip().upper()
+    if benchmark:
+        tickers = normalize_tickers([*tickers, benchmark])
+
+    if args.snapshot_date:
+        universe_db = args.universe_db or args.db
+        try:
+            rows = persist_universe_snapshot(
+                tickers,
+                db_path=universe_db,
+                as_of_date=args.snapshot_date,
+                source="mt5_watchlist" if args.mt5_watchlist else "ticker_input",
+                benchmark=benchmark,
+            )
+            print(f"Snapshot univerza: {rows} řádků k {args.snapshot_date} v {universe_db}.")
+        except Exception as exc:
+            print(f"Snapshot univerza selhal: {exc}")
+            return 1
 
     try:
         result = import_yahoo_prices(tickers, db_path=args.db, period=args.period)
