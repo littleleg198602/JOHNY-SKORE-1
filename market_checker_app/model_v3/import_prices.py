@@ -177,15 +177,15 @@ def main(argv: list[str] | None = None) -> int:
         print("Nebyl nalezen žádný ticker.")
         return 2
 
+    universe_tickers = normalize_tickers(tickers)
     benchmark = str(args.benchmark).strip().upper()
-    if benchmark:
-        tickers = normalize_tickers([*tickers, benchmark])
+    price_tickers = normalize_tickers([*universe_tickers, benchmark]) if benchmark else universe_tickers
 
     if args.snapshot_date:
         universe_db = args.universe_db or args.db
         try:
             rows = persist_universe_snapshot(
-                tickers,
+                universe_tickers,
                 db_path=universe_db,
                 as_of_date=args.snapshot_date,
                 source="mt5_watchlist" if args.mt5_watchlist else "ticker_input",
@@ -197,7 +197,7 @@ def main(argv: list[str] | None = None) -> int:
             return 1
 
     try:
-        result = import_yahoo_prices(tickers, db_path=args.db, period=args.period)
+        result = import_yahoo_prices(price_tickers, db_path=args.db, period=args.period)
     except Exception as exc:
         print(f"Import selhal: {exc}")
         return 1
